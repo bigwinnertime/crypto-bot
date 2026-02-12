@@ -18,6 +18,7 @@ class RiskManager:
                 'balance': 10000.0,      # 初始虚拟资金 1万 USDT
                 'initial_balance': 10000.0,
                 'total_pnl': 0.0,        # 累计盈亏金额
+                'total_fees': 0.0,
                 'trade_count': 0         # 总交易次数
             }
 

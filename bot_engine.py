@@ -135,6 +135,7 @@ class AdvancedTradingBot:
                     return False
                 
                 acc['balance'] -= total_cost
+                acc['total_fees'] += fee  # --- 累加买入手续费 ---
                 logger.info(f"🧪 [模拟买入] 成交:{raw_cost:.2f} | 手续费:{fee:.2f} | 剩余余额:{acc['balance']:.2f}")
                 
             elif side == 'sell':
@@ -143,6 +144,7 @@ class AdvancedTradingBot:
                 net_revenue = raw_revenue - fee  # 卖出时：实际到手 = 成交额 - 手续费
                 
                 acc['balance'] += net_revenue
+                acc['total_fees'] += fee  # --- 累加卖出手续费 ---
                 
                 # 计算盈亏（基于净到手金额）
                 pos = self.risk.state['positions'].get(symbol)

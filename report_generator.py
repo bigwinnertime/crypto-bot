@@ -15,22 +15,29 @@ class ReportGenerator:
         acc = state.get('virtual_account', {})
         positions = state.get('positions', {})
         
-        # 计算当前持仓的市场价值 (浮动盈亏)
-        floating_value = 0
-        # 这里的当前价格需要从交易所实时获取，为了简单，我们计算已实现部分
+        # 计算账户总值
+        current_balance = acc.get('balance', 0)
+        pos_value = sum(p.get('cost', 0) for p in positions.values()) # 以成本价计
+        total_equity = current_balance + pos_value
         
-        print("\n" + "💰 虚拟账户盈亏报告 " + "="*20)
-        print(f"💵 初始资金: {acc.get('initial_balance'):.2f} USDT")
-        print(f"🏦 当前可用余额: {acc.get('balance'):.2f} USDT")
-        print(f"📈 累计已实现盈亏: {acc.get('total_pnl'):.2f} USDT")
+        roi = ((total_equity / acc.get('initial_balance', 10000)) - 1) * 100
+        total_fees = acc.get('total_fees', 0)
         
-        total_equity = acc.get('balance') + sum(p.get('cost', 0) for p in positions.values())
-        roi = ((total_equity / acc.get('initial_balance')) - 1) * 100
+        print("\n" + "💰 虚拟账户详细报表 " + "="*20)
+        print(f"💵 初始本金: {acc.get('initial_balance'):.2f} USDT")
+        print(f"🏦 可用余额: {current_balance:.2f} USDT")
+        print(f"📦 在途仓位成本: {pos_value:.2f} USDT")
+        print(f"🛡️ 累计手续费支出: {total_fees:.2f} USDT")  # --- 展示手续费 ---
+        print("-" * 30)
+        print(f"📈 累计净盈亏 (扣费后): {acc.get('total_pnl'):.2f} USDT")
+        print(f"🚀 账户总净值: {total_equity:.2f} USDT")
+        print(f"📊 总收益率 (ROI): {roi:.2f}%")
+        print(f"🔢 交易动作总数: {acc.get('trade_count')} 次")
         
-        print(f"📊 账户总净值 (含仓位成本): {total_equity:.2f} USDT")
-        print(f"🚀 总收益率: {roi:.2f}%")
-        print(f"🔢 总交易次数: {acc.get('trade_count')}")
-        print("="*40)
+        if total_fees > 0:
+            fee_drag = (total_fees / acc.get('initial_balance')) * 100
+            print(f"⚠️ 手续费损耗占比: {fee_drag:.2f}% (相对于本金)")
+        print("="*42)
 
     def parse_trades_from_log(self):
         """从日志中提取买入和卖出记录"""
