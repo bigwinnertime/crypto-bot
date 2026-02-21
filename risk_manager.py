@@ -91,24 +91,38 @@ class RiskManager:
         import config
         spec = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
 
-        # 1. 初始化/更新该仓位见过的最高价
+        # 1. 计算当前相对于入场价的盈亏比例
+        # (当前价 - 入场价) / 入场价
+        current_profit = (current_price - pos['entry_price']) / pos['entry_price']
+
+        # 2. 初始化/更新最高价
         if 'highest_price' not in pos:
             pos['highest_price'] = pos['entry_price']
 
+        # 只要当前价破了新高，就更新最高价
         if current_price > pos['highest_price']:
             pos['highest_price'] = current_price
             self.save_state()
+            # 破新高时肯定没触发回撤，直接返回
             return None
 
-        # 2. 计算回撤比例
+        # 3. 计算从最高点的回撤比例
         drawdown = (pos['highest_price'] - current_price) / pos['highest_price']
-        # 3. 计算亏损比例 (相对于入场价)
+        # 4. 计算从入场价的亏损比例 (用于硬止损)
         loss_from_entry = (pos['entry_price'] - current_price) / pos['entry_price']
 
-        # 检查是否触发 追踪止盈 或 固定止损
-        if drawdown >= spec['trailing_stop_pct']:
-            return f"追踪止盈 (回撤 {drawdown:.2%})"
+        # --- 核心调整逻辑 ---
 
+        # 规则 A：只有当盈利曾达到过激活门槛（例如超过追踪比例），才允许触发“追踪止盈”
+        # 这样可以确保：如果没赚够钱，就不会因为微小波动触发“止盈”导致亏损
+        # 逻辑：最高价涨幅必须 > 追踪比例 (spec['trailing_stop_pct'])
+        highest_profit_reached = (pos['highest_price'] - pos['entry_price']) / pos['entry_price']
+
+        if highest_profit_reached > spec['trailing_stop_pct']:
+            if drawdown >= spec['trailing_stop_pct']:
+                return f"追踪止盈 (回撤 {drawdown:.2%})"
+
+        # 规则 B：无论盈利与否，只要触及底线，立即执行“固定止损”
         if loss_from_entry >= spec['stop_loss_pct']:
             return f"固定止损 (亏损 {loss_from_entry:.2%})"
 

@@ -24,23 +24,23 @@ BB_STD = 2                 # 布林带标准差
 # --- 币种差异化策略参数 ---
 STRATEGY_CONFIG = {
     'BTC/USDT': {
-        'adx_threshold': 99,    # BTC 波动较小，20 即可确立趋势
-        'rsi_oversold': 30,
+        'adx_threshold': 30,    # BTC 波动较小，20 即可确立趋势
+        'rsi_oversold': 40,
         'rsi_overbought': 75,
         'trade_amount': 30,      # BTC 可以仓位稍大
-        'stop_loss_pct': 0.02,     # 2% 固定硬止损
-        'trailing_stop_pct': 0.015 # 1.5% 追踪止盈回调
+        'stop_loss_pct': 0.03,     # 2% 固定硬止损
+        'trailing_stop_pct': 0.02 # 1.5% 追踪止盈回调
     },
     'ETH/USDT': {
-        'adx_threshold': 25,
-        'rsi_oversold': 30,
+        'adx_threshold': 30,
+        'rsi_oversold': 40,
         'rsi_overbought': 75,
         'trade_amount': 20,
-        'stop_loss_pct': 0.02,     # 2% 固定硬止损
-        'trailing_stop_pct': 0.015 # 1.5% 追踪止盈回调
+        'stop_loss_pct': 0.05,     # 2% 固定硬止损
+        'trailing_stop_pct': 0.4 # 1.5% 追踪止盈回调
     },
     'SOL/USDT': {
-        'adx_threshold': 1,    # SOL 波动剧烈，需要 35 以上的高强度才追涨，防止被骗炮
+        'adx_threshold': 35,    # SOL 波动剧烈，需要 35 以上的高强度才追涨，防止被骗炮
         'rsi_oversold': 25,     # 跌得更深才买入
         'rsi_overbought': 80,   # 涨得更高才卖出
         'trade_amount': 10,      # 高波动币种减小单笔金额

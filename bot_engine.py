@@ -83,35 +83,39 @@ class AdvancedTradingBot:
 
     def get_strategy_signal(self, df, symbol):
         # 1. 根据币种名字，从 config.py 的字典中抓取属于它的参数
-        spec_config = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
+        spec = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
 
-        # 2. 提取该币种特有的 ADX 阈值
-        target_adx = spec_config['adx_threshold']
-
-        # 3. 计算指标
+        # 2. 计算指标
         adx = ADXIndicator(df['high'], df['low'], df['close']).adx().iloc[-1]
         rsi = RSIIndicator(df['close']).rsi().iloc[-1]
+        sma_short = SMAIndicator(df['close'], window=20).sma_indicator().iloc[-1]
+        sma_long = SMAIndicator(df['close'], window=60).sma_indicator().iloc[-1]
         price = df['close'].iloc[-1]
-       
-        # --- 新增：调试专用日志 ---
-        # 这一行会告诉你每个币种当前在做什么决定
-        logger.info(f"🔍 [{symbol}] 当前 ADX: {adx:.2f} | 设定阈值: {target_adx} | 判定模式: {'趋势' if adx > target_adx else '震荡'}")
-        # ----------------------- 
 
-        # 4. 环境判定：不同币种在这里会走向不同的逻辑分支
-        # 例如：SOL 需要 ADX > 35 才会进入趋势模式，而 BTC 只需要 > 20
-        if adx > target_adx:
-            sma = SMAIndicator(df['close'], window=20).sma_indicator().iloc[-1]
-            if price > sma:
-                return "BUY", f"TREND_UP(ADX:{adx:.1f}>{target_adx})"
-            if price < sma:
+        # 辅助日志：每轮巡检的基础状态（可选，如果嫌日志太多可以注释掉）
+        logger.debug(f"📊 {symbol} 状态扫描: Price:{price:.2f}, ADX:{adx:.1f}, RSI:{rsi:.1f}")
+        # --- 逻辑 A：强趋势模式 (ADX > 阈值) ---
+        if adx > spec['adx_threshold']:
+            mode_str = "【趋势模式】"
+            # 增加条件判断日志
+            if price > sma_short and sma_short > sma_long:
+                logger.info(f"📈 {symbol} {mode_str} 触发买入 | 原因: 价格 > SMA20({sma_short:.2f}) 且 均线多头排列(SMA20 > SMA60)")
+                return "BUY", "TREND_STRENGTH"
+
+            if price < sma_long:
+                logger.info(f"📉 {symbol} {mode_str} 触发卖出 | 原因: 价格跌破 SMA60({sma_long:.2f}) 趋势终结")
                 return "SELL", "TREND_EXIT"
+
+        # --- 逻辑 B：弱势/震荡模式 (ADX <= 阈值) ---
         else:
-            # 震荡模式：使用该币种特定的 RSI 边界
-            if rsi < spec_config['rsi_oversold']:
-                return "BUY", f"RANGE_LOW(RSI:{rsi:.1f})"
-            if rsi > spec_config['rsi_overbought']:
-                return "SELL", f"RANGE_HIGH(RSI:{rsi:.1f})"
+            mode_str = "【震荡模式】"
+            if rsi < spec['rsi_oversold']:
+                logger.info(f"底部反弹 {symbol} {mode_str} 触发买入 | 原因: RSI({rsi:.1f}) < 阈值({spec['rsi_oversold']})")
+                return "BUY", "MEAN_REVERSION"
+
+            if rsi > spec['rsi_overbought']:
+                logger.info(f"顶部回落 {symbol} {mode_str} 触发卖出 | 原因: RSI({rsi:.1f}) > 阈值({spec['rsi_overbought']})")
+                return "SELL", "RANGE_EXIT"
 
         return "HOLD", "NONE"
 
