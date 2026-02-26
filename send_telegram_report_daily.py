@@ -1,7 +1,7 @@
-from notifier import Notifier
+from telegram_notifier import send_notification
 import os
 
-def send_daily_email():
+def send_daily_msg():
     report_path = 'daily_report.txt'
     
     if not os.path.exists(report_path):
@@ -12,12 +12,12 @@ def send_daily_email():
         report_content = f.read()
 
     # 实例化你之前的通知模块
-    n = Notifier()
+    #n = TelegramNotifier()
     subject = f"📅 交易机器人每日统计报告 - {os.popen('date +%Y-%m-%d').read().strip()}"
     
     # 发送邮件
-    n.send_email(subject, report_content)
-    print("📧 每日报告邮件已发出。")
+    send_notification(subject, report_content)
+    print("📧 每日报告已发出。")
 
 if __name__ == "__main__":
-    send_daily_email()
+    send_daily_msg()

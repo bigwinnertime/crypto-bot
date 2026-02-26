@@ -18,9 +18,12 @@ from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator, ADXIndicator
 from ta.volatility import BollingerBands
 
+import threading
+from remote_control import start_remote_listener
+
 import config
 from risk_manager import RiskManager
-from notifier import Notifier
+from telegram_notifier import send_notification
 
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
@@ -38,6 +41,9 @@ logger = logging.getLogger("TradingBot.Main")
 
 class AdvancedTradingBot:
     def __init__(self):
+        # 启动远程控制线程
+        self.cmd_thread = threading.Thread(target=start_remote_listener, daemon=True)
+        self.cmd_thread.start()
         #load_dotenv()
         # 1. 提取私钥并处理换行符
         raw_key = os.getenv('BINANCE_SECRET_KEY', '')
@@ -61,7 +67,7 @@ class AdvancedTradingBot:
             max_exposure=config.MAX_TOTAL_EXPOSURE, 
             fuse_limit=config.DRAWDOWN_FUSE
         )
-        self.notifier = Notifier() # 实例化通知模块
+        # self.notifier = Notifier() # 实例化通知模块
 
     def fetch_data(self, symbol):
         try:
@@ -99,22 +105,22 @@ class AdvancedTradingBot:
             mode_str = "【趋势模式】"
             # 增加条件判断日志
             if price > sma_short and sma_short > sma_long:
-                logger.info(f"📈 {symbol} {mode_str} 触发买入 | 原因: 价格 > SMA20({sma_short:.2f}) 且 均线多头排列(SMA20 > SMA60)")
+                logger.debug(f"📈 {symbol} {mode_str} 触发买入 | 原因: 价格 > SMA20({sma_short:.2f}) 且 均线多头排列(SMA20 > SMA60)")
                 return "BUY", "TREND_STRENGTH"
 
             if price < sma_long:
-                logger.info(f"📉 {symbol} {mode_str} 触发卖出 | 原因: 价格跌破 SMA60({sma_long:.2f}) 趋势终结")
+                logger.debug(f"📉 {symbol} {mode_str} 触发卖出 | 原因: 价格跌破 SMA60({sma_long:.2f}) 趋势终结")
                 return "SELL", "TREND_EXIT"
 
         # --- 逻辑 B：弱势/震荡模式 (ADX <= 阈值) ---
         else:
             mode_str = "【震荡模式】"
             if rsi < spec['rsi_oversold']:
-                logger.info(f"底部反弹 {symbol} {mode_str} 触发买入 | 原因: RSI({rsi:.1f}) < 阈值({spec['rsi_oversold']})")
+                logger.debug(f"底部反弹 {symbol} {mode_str} 触发买入 | 原因: RSI({rsi:.1f}) < 阈值({spec['rsi_oversold']})")
                 return "BUY", "MEAN_REVERSION"
 
             if rsi > spec['rsi_overbought']:
-                logger.info(f"顶部回落 {symbol} {mode_str} 触发卖出 | 原因: RSI({rsi:.1f}) > 阈值({spec['rsi_overbought']})")
+                logger.debug(f"顶部回落 {symbol} {mode_str} 触发卖出 | 原因: RSI({rsi:.1f}) > 阈值({spec['rsi_overbought']})")
                 return "SELL", "RANGE_EXIT"
 
         return "HOLD", "NONE"
@@ -180,7 +186,8 @@ class AdvancedTradingBot:
                     # 风险熔断检查
                     if self.risk.check_circuit_breaker(symbol, df):
                         if self.risk.state['is_fused']:
-                            self.notifier.send_email(f"🚨 紧急熔断: {symbol}", "检测到异常跌幅，系统已自动锁定。")
+                            # self.notifier.send_email(f"🚨 紧急熔断: {symbol}", "检测到异常跌幅，系统已自动锁定。")
+                            send_notification(f"🚨  紧急熔断: {symbol}", "检测到异常跌幅，系统已自动锁定。")
                         continue
                     
                     price = df['close'].iloc[-1]
@@ -193,7 +200,8 @@ class AdvancedTradingBot:
                         if self._execute_order(symbol, 'sell', pos.get('amount', 0), price, stop_reason):
                             logger.warning(f"🚨 {symbol} 触发 {stop_reason}")
                             pnl = (price / pos['entry_price'] - 1) * 100
-                            self.notifier.send_email(f"🆘 离场通知: {symbol}", f"原因: {stop_reason}\n收益率: {pnl:.2f}%")
+                            # self.notifier.send_email(f"🆘 离场通知: {symbol}", f"原因: {stop_reason}\n收益率: {pnl:.2f}%")
+                            send_notification(f"🆘  离场通知: {symbol}", f"*原因*: {stop_reason}\n*收益率*: {pnl:.2f}%")
                             del self.risk.state['positions'][symbol]
                             self.risk.save_state()
                         continue
@@ -218,15 +226,46 @@ class AdvancedTradingBot:
                                 "time": time.strftime("%Y-%m-%d %H:%M:%S")
                             }
                             self.risk.save_state()
-                            self.notifier.send_email(f"✅ 买入成交: {symbol}", f"价格: {price}\n模式: {mode}")
+                            safe_mode = mode.replace("_", " ")
+                            #self.notifier.send_email(f"✅ 买入成交: {symbol}", f"价格: {price}\n模式: {mode}")
+                            send_notification(f"✅  买入成交: {symbol}", f"*价格*: {price}\n*模式*: {safe_mode}")
 
                     # 执行策略卖出（RSI超买等信号）
                     elif signal == "SELL" and pos:
                         if self._execute_order(symbol, 'sell', pos['amount'], price, mode):
-                            pnl = (price / pos['entry_price'] - 1) * 100
+                            # 计算本单数据
+                            pnl_val = (price - pos['entry_price']) * pos['amount']
+                            pnl_pct = (price / pos['entry_price'] - 1) * 100
+
+                            # 构建历史字典
+                            trade_record = {
+                                "symbol": symbol,
+                                "entry_price": pos['entry_price'],
+                                "sell_price": price,
+                                "amount": pos['amount'],
+                                "pnl_amount": pnl_val,
+                                "pnl_pct": pnl_pct,
+                                "exit_reason": mode,
+                                "sell_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            }
+
+
+                            # 存入 state 并保存
+                            if 'trade_history' not in self.risk.state:
+                                self.risk.state['trade_history'] = []
+                            self.risk.state['trade_history'].append(trade_record)
+
+                            # 更新账户总盈亏次数
+                            self.risk.state['virtual_account']['total_pnl'] += pnl_val
+                            self.risk.state['virtual_account']['trade_count'] += 1
+
+                            # 最后删除持仓
                             del self.risk.state['positions'][symbol]
                             self.risk.save_state()
-                            self.notifier.send_email(f"🔻 卖出成交: {symbol}", f"收益率: {pnl:.2f}%")
+
+                            # 发送通知
+                            #self.notifier.send_email(f"🔻 卖出成交: {symbol}", f"收益率: {pnl:.2f}%")
+                            send_notification(f"🔻 卖出成交: {symbol}", f"*收益率*: {pnl:.2f}%")
 
                 time.sleep(60) 
             except Exception as e:

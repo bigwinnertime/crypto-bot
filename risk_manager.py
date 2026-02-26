@@ -24,13 +24,46 @@ class RiskManager:
 
     def load_state(self):
         """从 JSON 加载机器人记忆"""
-        if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"读取状态文件失败，创建新状态: {e}")
-        return {"positions": {}, "is_fused": False, "fuse_time": 0}
+        # --- 第一步：先定义默认值，确保作用域覆盖整个函数 ---
+        defaults = {
+            "positions": {},
+            "is_fused": False,
+            "fuse_time": 0,
+            "trade_history": [],
+            "virtual_account": {
+                "balance": 10000.0,
+                "initial_balance": 10000.0,
+                "total_pnl": 0.0,
+                "total_fees": 0.0,
+                "trade_count": 0
+            }
+        }
+
+        try:
+            # 如果文件不存在，直接返回默认值
+            if not os.path.exists(self.state_file):
+                return defaults
+                
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+                
+            # --- 第二步：使用默认值补全读取到的 state ---
+            # 这种写法可以防止以后增加新功能时，旧的 JSON 文件缺少字段导致报错
+            for key, value in defaults.items():
+                if key not in state:
+                    state[key] = value
+                # 针对嵌套的 virtual_account 也要检查
+                if key == "virtual_account":
+                    for sub_key, sub_value in defaults["virtual_account"].items():
+                        if sub_key not in state["virtual_account"]:
+                            state["virtual_account"][sub_key] = sub_value
+            
+            return state
+
+        except (json.JSONDecodeError, Exception) as e:
+            # 如果文件损坏或其他异常，安全返回默认值
+            print(f"⚠️ 读取状态文件异常，已加载默认设置: {e}")
+            return defaults
 
     def save_state(self):
         """持久化保存当前持仓和熔断状态"""

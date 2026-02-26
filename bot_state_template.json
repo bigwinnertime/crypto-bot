@@ -1,0 +1,11 @@
+{
+    "positions": {},
+    "virtual_account": {
+        "balance": 10000.0,
+        "initial_balance": 10000.0,
+        "total_pnl": 0.0,
+        "total_fees": 0.0,
+        "trade_count": 0
+    },
+    "trade_history": []
+}

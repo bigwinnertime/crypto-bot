@@ -14,8 +14,8 @@ cd ${PROJECT_DIR}
 # 运行 report_generator.py 并将输出重定向到文件
 ${PYTHON_EXEC} report_generator.py > daily_report.txt
 
-# 4. 调用 Python 发送邮件
-${PYTHON_EXEC} send_email_report_daily.py
+# 4. 调用 Python 发送telegram
+${PYTHON_EXEC} send_telegram_report_daily.py
 
 # 5. (可选) 清理日志或备份报告
 # cp daily_report.txt ./history/report_$(date +%Y%m%d).txt

@@ -73,3 +73,8 @@ EMAIL_SMTP_PORT = int(os.getenv('EMAIL_SMTP_PORT', 465))
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
 EMAIL_RECEIVER = os.getenv('EMAIL_RECEIVER')
+
+
+# --- 电报机器人通知配置中心 ---
+TELEGRAM_TOKEN= os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID= os.getenv('TELEGRAM_CHAT_ID')

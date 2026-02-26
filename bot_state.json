@@ -1,27 +1,35 @@
 {
     "positions": {
-        "ETH/USDT": {
-            "entry_price": 1950.49,
-            "amount": 0.010253833652056663,
-            "cost": 20,
-            "highest_price": 2036.97,
-            "time": "2026-02-17 22:46:08"
-        },
         "BTC/USDT": {
-            "entry_price": 66508.71,
-            "amount": 0.00045106873971845186,
+            "entry_price": 68409.55,
+            "amount": 0.00043853526298594274,
             "cost": 30,
-            "highest_price": 68224.84,
-            "time": "2026-02-20 21:39:58"
+            "highest_price": 68438.52,
+            "time": "2026-02-26 13:55:52"
+        },
+        "ETH/USDT": {
+            "entry_price": 2067.2,
+            "amount": 0.009674922600619196,
+            "cost": 20,
+            "highest_price": 2068.14,
+            "time": "2026-02-26 13:55:53"
+        },
+        "SOL/USDT": {
+            "entry_price": 87.73,
+            "amount": 0.11398609369656901,
+            "cost": 10,
+            "highest_price": 87.77,
+            "time": "2026-02-26 13:55:53"
         }
     },
     "is_fused": false,
     "fuse_time": 0,
+    "trade_history": [],
     "virtual_account": {
-        "balance": 9949.400279986829,
+        "balance": 9939.939999999999,
         "initial_balance": 10000.0,
-        "total_pnl": -0.42972001316777764,
-        "total_fees": 0.289689969956789,
-        "trade_count": 4
+        "total_pnl": 0.0,
+        "total_fees": 0.060000000000000005,
+        "trade_count": 0
     }
 }
