@@ -2,10 +2,14 @@ import json
 import os
 import time
 import logging
+import threading
 
 logger = logging.getLogger("TradingBot.Risk")
 
 class RiskManager:
+    # 创建一个类级别的锁（单例模式），确保所有实例共享同一把锁
+    _file_lock = threading.Lock()
+
     def __init__(self, state_file="bot_state.json", max_exposure=0.7, fuse_limit=0.05):
         self.state_file = state_file
         self.max_exposure = max_exposure
@@ -38,41 +42,42 @@ class RiskManager:
                 "trade_count": 0
             }
         }
+        with self._file_lock:
+            try:
+                # 如果文件不存在，直接返回默认值
+                if not os.path.exists(self.state_file):
+                    return defaults
+                    
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
+                    
+                # --- 第二步：使用默认值补全读取到的 state ---
+                # 这种写法可以防止以后增加新功能时，旧的 JSON 文件缺少字段导致报错
+                for key, value in defaults.items():
+                    if key not in state:
+                        state[key] = value
+                    # 针对嵌套的 virtual_account 也要检查
+                    if key == "virtual_account":
+                        for sub_key, sub_value in defaults["virtual_account"].items():
+                            if sub_key not in state["virtual_account"]:
+                                state["virtual_account"][sub_key] = sub_value
+                
+                return state
 
-        try:
-            # 如果文件不存在，直接返回默认值
-            if not os.path.exists(self.state_file):
+            except (json.JSONDecodeError, Exception) as e:
+                # 如果文件损坏或其他异常，安全返回默认值
+                print(f"⚠️ 读取状态文件异常，已加载默认设置: {e}")
                 return defaults
-                
-            with open(self.state_file, 'r') as f:
-                state = json.load(f)
-                
-            # --- 第二步：使用默认值补全读取到的 state ---
-            # 这种写法可以防止以后增加新功能时，旧的 JSON 文件缺少字段导致报错
-            for key, value in defaults.items():
-                if key not in state:
-                    state[key] = value
-                # 针对嵌套的 virtual_account 也要检查
-                if key == "virtual_account":
-                    for sub_key, sub_value in defaults["virtual_account"].items():
-                        if sub_key not in state["virtual_account"]:
-                            state["virtual_account"][sub_key] = sub_value
-            
-            return state
-
-        except (json.JSONDecodeError, Exception) as e:
-            # 如果文件损坏或其他异常，安全返回默认值
-            print(f"⚠️ 读取状态文件异常，已加载默认设置: {e}")
-            return defaults
 
     def save_state(self):
         """持久化保存当前持仓和熔断状态"""
-        try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                # ensure_ascii=False 是关键，防止中文保存为 \uXXXX
-                json.dump(self.state, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"保存状态文件失败: {e}")
+        with self._file_lock:
+            try:
+                with open(self.state_file, 'w', encoding='utf-8') as f:
+                    # ensure_ascii=False 是关键，防止中文保存为 \uXXXX
+                    json.dump(self.state, f, indent=4, ensure_ascii=False)
+            except Exception as e:
+                logger.error(f"保存状态文件失败: {e}")
 
     def check_circuit_breaker(self, symbol, df):
         """熔断机制：防止在暴跌中持续接飞刀"""
@@ -120,43 +125,127 @@ class RiskManager:
             return None
 
         pos = self.state['positions'][symbol]
-        # 获取该币种特有配置
+        
+        # --- 1. 动态优先级参数获取 ---
         import config
-        spec = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
+        # 获取 Telegram 运行时的动态配置 (第一优先级)
+        runtime_cfg = self.state.get('runtime_config', {}).get(symbol, {})
+        # 获取币种特定配置 (第二优先级)
+        spec_cfg = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
 
-        # 1. 计算当前相对于入场价的盈亏比例
-        # (当前价 - 入场价) / 入场价
-        current_profit = (current_price - pos['entry_price']) / pos['entry_price']
+        # 最终采用的比例：runtime -> spec -> default
+        ts_pct = runtime_cfg.get('trailing_stop_pct', spec_cfg.get('trailing_stop_pct', 0.01))
+        sl_pct = runtime_cfg.get('stop_loss_pct', spec_cfg.get('stop_loss_pct', 0.02))
 
-        # 2. 初始化/更新最高价
+        # --- 2. 更新最高价 ---
         if 'highest_price' not in pos:
             pos['highest_price'] = pos['entry_price']
 
         # 只要当前价破了新高，就更新最高价
         if current_price > pos['highest_price']:
             pos['highest_price'] = current_price
+            # 注意：这里调用的是带锁的 save_state
             self.save_state()
-            # 破新高时肯定没触发回撤，直接返回
             return None
 
-        # 3. 计算从最高点的回撤比例
+        # --- 3. 计算比例 ---
+        # 计算从最高点的回撤比例
         drawdown = (pos['highest_price'] - current_price) / pos['highest_price']
-        # 4. 计算从入场价的亏损比例 (用于硬止损)
+        # 计算从入场价的亏损比例 (用于硬止损)
         loss_from_entry = (pos['entry_price'] - current_price) / pos['entry_price']
-
-        # --- 核心调整逻辑 ---
-
-        # 规则 A：只有当盈利曾达到过激活门槛（例如超过追踪比例），才允许触发“追踪止盈”
-        # 这样可以确保：如果没赚够钱，就不会因为微小波动触发“止盈”导致亏损
-        # 逻辑：最高价涨幅必须 > 追踪比例 (spec['trailing_stop_pct'])
+        # 计算最高点曾达到的涨幅
         highest_profit_reached = (pos['highest_price'] - pos['entry_price']) / pos['entry_price']
 
-        if highest_profit_reached > spec['trailing_stop_pct']:
-            if drawdown >= spec['trailing_stop_pct']:
-                return f"追踪止盈 (回撤 {drawdown:.2%})"
+        # --- 4. 判定逻辑 ---
 
-        # 规则 B：无论盈利与否，只要触及底线，立即执行“固定止损”
-        if loss_from_entry >= spec['stop_loss_pct']:
-            return f"固定止损 (亏损 {loss_from_entry:.2%})"
+        # 规则 A：追踪止盈 (使用 ts_pct)
+        # 逻辑：只有当最高点涨幅超过了追踪比例，才开启回撤监控
+        if highest_profit_reached > ts_pct:
+            if drawdown >= ts_pct:
+                return f"追踪止盈 (回撤 {drawdown:.2%}, 设定阈值 {ts_pct:.2%})"
+
+        # 规则 B：固定止损 (使用 sl_pct)
+        if loss_from_entry >= sl_pct:
+            return f"固定止损 (亏损 {loss_from_entry:.2%}, 设定阈值 {sl_pct:.2%})"
 
         return None
+
+    def update_runtime_config(self, symbol, key, value):
+        """
+        安全地更新运行时配置（如 SL, TS 比例）
+        symbol: 币种名，如 'BTC/USDT'
+        key: 配置项名称，如 'trailing_stop_pct'
+        value: 新的数值，如 0.01
+        """
+        with self._file_lock:
+            # 确保 runtime_config 结构存在
+            if 'runtime_config' not in self.state:
+                self.state['runtime_config'] = {}
+            if symbol not in self.state['runtime_config']:
+                self.state['runtime_config'][symbol] = {}
+                
+            # 写入新参数
+            self.state['runtime_config'][symbol][key] = value
+            
+            # 立即持久化到 bot_state.json
+            self.save_state()
+            logger.info(f"⚙️ 远程配置更新: {symbol} {key} = {value}")
+
+    def remote_set_fuse(self, status: bool):
+        """供 Telegram 线程安全设置熔断"""
+        with self._file_lock:
+            self.state['is_fused'] = status
+            self.state['fuse_time'] = time.time() if status else 0
+            self.save_state()
+
+    def execute_buy_update(self, symbol, price, amount, cost, mode):
+        """统一封装：买入后的状态更新逻辑"""
+        with self._file_lock:
+            # 更新持仓字典
+            self.state['positions'][symbol] = {
+                "entry_price": price,
+                "amount": amount,
+                "cost": cost,
+                "highest_price": price,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            # 扣除虚拟账户余额 (已经在 _execute_order 里处理过的可以不重复扣，
+            # 但为了逻辑严密，建议状态更新统一由此处负责)
+            self.save_state()
+
+    def execute_sell_update(self, symbol, price, mode):
+        """统一封装：卖出后的状态更新逻辑（计算PnL、存入历史、清空持仓）"""
+        with self._file_lock:
+            if symbol not in self.state['positions']:
+                return None
+                
+            pos = self.state['positions'][symbol]
+            pnl_val = (price - pos['entry_price']) * pos['amount']
+            pnl_pct = (price / pos['entry_price'] - 1) * 100
+            
+            # 1. 构建交易记录
+            trade_record = {
+                "symbol": symbol,
+                "entry_price": pos['entry_price'],
+                "sell_price": price,
+                "amount": pos['amount'],
+                "pnl_amount": pnl_val,
+                "pnl_pct": pnl_pct,
+                "exit_reason": mode,
+                "sell_time": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            # 2. 存入历史记录
+            if 'trade_history' not in self.state:
+                self.state['trade_history'] = []
+            self.state['trade_history'].append(trade_record)
+            
+            # 3. 更新虚拟账户总统计
+            self.state['virtual_account']['total_pnl'] += pnl_val
+            self.state['virtual_account']['trade_count'] += 1
+            
+            # 4. 移除持仓并保存
+            del self.state['positions'][symbol]
+            self.save_state()
+            
+            return pnl_pct  # 返回收益率供通知使用

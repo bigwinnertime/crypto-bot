@@ -1,24 +1,2 @@
 
-2026-02-26 13:37:08,589 [INFO] 🚀 系统已启动 (当前模式: 测试/模拟)
-2026-02-26 13:37:11,475 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:37:21,571 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:37:31,669 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:37:41,766 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:37:51,862 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:38:01,958 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:38:12,056 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:38:22,153 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:38:32,251 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:38:42,348 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:38:52,445 [ERROR] 运行异常: 'is_fused'
-2026-02-26 13:45:58,305 [INFO] 🚀 系统已启动 (当前模式: 测试/模拟)
-2026-02-26 13:46:00,858 [INFO] 🧪 [模拟买入] 成交:30.00 | 手续费:0.03 | 剩余余额:9969.97
-2026-02-26 13:46:01,392 [ERROR] TG通知发送失败: {"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 69"}
-2026-02-26 13:46:01,479 [INFO] 🧪 [模拟买入] 成交:20.00 | 手续费:0.02 | 剩余余额:9949.95
-2026-02-26 13:46:02,016 [ERROR] TG通知发送失败: {"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 69"}
-2026-02-26 13:46:02,102 [INFO] 🧪 [模拟买入] 成交:10.00 | 手续费:0.01 | 剩余余额:9939.94
-2026-02-26 13:46:02,650 [ERROR] TG通知发送失败: {"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 67"}
-2026-02-26 13:55:49,792 [INFO] 🚀 系统已启动 (当前模式: 测试/模拟)
-2026-02-26 13:55:52,473 [INFO] 🧪 [模拟买入] 成交:30.00 | 手续费:0.03 | 剩余余额:9969.97
-2026-02-26 13:55:53,191 [INFO] 🧪 [模拟买入] 成交:20.00 | 手续费:0.02 | 剩余余额:9949.95
-2026-02-26 13:55:53,895 [INFO] 🧪 [模拟买入] 成交:10.00 | 手续费:0.01 | 剩余余额:9939.94
+2026-02-27 14:12:02,424 [INFO] 🚀 系统已启动 (当前模式: 测试/模拟)

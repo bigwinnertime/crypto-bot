@@ -218,14 +218,9 @@ class AdvancedTradingBot:
                         
                         # 调用统一拦截器
                         if self._execute_order(symbol, 'buy', amount, price, mode):
-                            self.risk.state['positions'][symbol] = {
-                                "entry_price": price, 
-                                "amount": amount, # 记得保存数量，卖出时需要
-                                "cost": trade_amount,
-                                "highest_price": price, # 为追踪止盈初始化
-                                "time": time.strftime("%Y-%m-%d %H:%M:%S")
-                            }
-                            self.risk.save_state()
+                            self.risk.execute_buy_update(symbol, price, amount, trade_amount, mode)
+
+                            # 发送通知
                             safe_mode = mode.replace("_", " ")
                             #self.notifier.send_email(f"✅ 买入成交: {symbol}", f"价格: {price}\n模式: {mode}")
                             send_notification(f"✅  买入成交: {symbol}", f"*价格*: {price}\n*模式*: {safe_mode}")
@@ -233,35 +228,7 @@ class AdvancedTradingBot:
                     # 执行策略卖出（RSI超买等信号）
                     elif signal == "SELL" and pos:
                         if self._execute_order(symbol, 'sell', pos['amount'], price, mode):
-                            # 计算本单数据
-                            pnl_val = (price - pos['entry_price']) * pos['amount']
-                            pnl_pct = (price / pos['entry_price'] - 1) * 100
-
-                            # 构建历史字典
-                            trade_record = {
-                                "symbol": symbol,
-                                "entry_price": pos['entry_price'],
-                                "sell_price": price,
-                                "amount": pos['amount'],
-                                "pnl_amount": pnl_val,
-                                "pnl_pct": pnl_pct,
-                                "exit_reason": mode,
-                                "sell_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            }
-
-
-                            # 存入 state 并保存
-                            if 'trade_history' not in self.risk.state:
-                                self.risk.state['trade_history'] = []
-                            self.risk.state['trade_history'].append(trade_record)
-
-                            # 更新账户总盈亏次数
-                            self.risk.state['virtual_account']['total_pnl'] += pnl_val
-                            self.risk.state['virtual_account']['trade_count'] += 1
-
-                            # 最后删除持仓
-                            del self.risk.state['positions'][symbol]
-                            self.risk.save_state()
+                            pnl_pct = self.risk.execute_sell_update(symbol, price, mode)
 
                             # 发送通知
                             #self.notifier.send_email(f"🔻 卖出成交: {symbol}", f"收益率: {pnl:.2f}%")

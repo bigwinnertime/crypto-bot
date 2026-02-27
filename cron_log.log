@@ -15,3 +15,4 @@ Traceback (most recent call last):
   File "/root/project/auto_trade/crypto_bot/send_email_report_daily.py", line 1, in <module>
     from telegram_notifier import Notifier
 ImportError: cannot import name 'Notifier' from 'telegram_notifier' (/root/project/auto_trade/crypto_bot/telegram_notifier.py)
+📧 每日报告已发出。
