@@ -172,12 +172,13 @@ class AdvancedTradingBot:
         logger.info(f"🚀 系统已启动 (当前模式: {'实盘' if config.LIVE_TRADE else '测试/模拟'})")
         while True:
             try:
-                # 获取账户余额 (实盘获取真实余额，模拟模式可手动在代码里写死一个数值)
+                # 获取账户余额 (实盘获取真实余额，模拟模式使用虚拟账户余额)
                 if config.LIVE_TRADE:
                     balance_info = self.exchange.fetch_balance()
                     total_usdt = balance_info['total'].get('USDT', 0)
                 else:
-                    total_usdt = 10000.0  # 模拟模式给 1万 USDT 初始资金
+                    # 模拟模式使用虚拟账户的当前余额
+                    total_usdt = self.risk.state['virtual_account']['balance']
 
                 for symbol in config.SYMBOLS:
                     df = self.fetch_data(symbol)

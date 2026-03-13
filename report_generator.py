@@ -1,6 +1,8 @@
 import json
-import pandas as pd
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ReportGenerator:
     def __init__(self, state_file='bot_state.json'):
@@ -12,7 +14,7 @@ class ReportGenerator:
             with open(self.state_file, 'r') as f:
                 state = json.load(f)
         except Exception as e:
-            print(f"❌ 读取状态文件失败: {e}")
+            logger.error(f"❌ 读取状态文件失败: {e}")
             return
 
         acc = state.get('virtual_account', {})
@@ -55,22 +57,73 @@ class ReportGenerator:
         if not history:
             print("   暂无历史交易数据 (等待首笔平仓...)")
         else:
-            df = pd.DataFrame(history)
-            total_trades = len(df)
-            wins = len(df[df['pnl_pct'] > 0])
-            win_rate = (wins / total_trades) * 100
-            total_pnl = df['pnl_amount'].sum()
+            # 标准化数据结构以适配不同的字段名
+            normalized_history = []
+            for trade in history:
+                # 计算盈亏金额（如果不存在pnl_amount字段）
+                pnl_amount = trade.get('pnl_amount', 0)
+                if pnl_amount == 0:
+                    # 使用固定的交易金额来计算盈亏（根据币种设定）
+                    symbol = trade.get('symbol', '')
+                    if 'BTC' in symbol:
+                        trade_amount = 30  # BTC默认交易金额
+                    elif 'ETH' in symbol:
+                        trade_amount = 20  # ETH默认交易金额
+                    else:
+                        trade_amount = 10  # 其他币种默认交易金额
+                    
+                    # 根据收益率计算盈亏金额
+                    pnl_pct = trade.get('pnl_pct', 0)
+                    pnl_amount = trade_amount * (pnl_pct / 100)
+                
+                normalized_trade = {
+                    'symbol': trade.get('symbol', ''),
+                    'entry_price': trade.get('entry_price', trade.get('entry', 0)),
+                    'sell_price': trade.get('sell_price', trade.get('exit', 0)),
+                    'amount': trade.get('amount', 0),
+                    'pnl_pct': trade.get('pnl_pct', 0),
+                    'pnl_amount': pnl_amount,
+                    'exit_reason': trade.get('exit_reason', trade.get('reason', '')),
+                    'sell_time': trade.get('sell_time', trade.get('time', ''))
+                }
+                normalized_history.append(normalized_trade)
+            
+            total_trades = len(normalized_history)
+            wins = len([trade for trade in normalized_history if trade['pnl_pct'] > 0])
+            losses = len([trade for trade in normalized_history if trade['pnl_pct'] < 0])
+            win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
+            total_pnl = sum(trade['pnl_amount'] for trade in normalized_history)
+            
+            # 计算平均盈亏
+            avg_win = sum(trade['pnl_amount'] for trade in normalized_history if trade['pnl_pct'] > 0) / wins if wins > 0 else 0
+            avg_loss = sum(trade['pnl_amount'] for trade in normalized_history if trade['pnl_pct'] < 0) / losses if losses > 0 else 0
+            
+            # 计算最大连续亏损次数
+            consecutive_losses = 0
+            max_consecutive_losses = 0
+            for trade in normalized_history:
+                if trade['pnl_pct'] < 0:
+                    consecutive_losses += 1
+                    max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+                else:
+                    consecutive_losses = 0
             
             print(f"✅ 总成交: {total_trades} 笔")
             print(f"🏆 胜率: {win_rate:.2f}%")
             print(f"💰 累计净利润: {total_pnl:.2f} USDT")
+            print(f"📊 平均盈利: {avg_win:.2f} USDT")
+            print(f"📉 平均亏损: {avg_loss:.2f} USDT")
+            print(f"🔥 最大连续亏损: {max_consecutive_losses} 笔")
             
             print("\n📝 最近 5 笔交易记录:")
-            # 格式化输出最近5笔
-            recent = df.tail(5)[['sell_time', 'symbol', 'pnl_pct', 'exit_reason']]
-            # 美化时间显示，只留时分
-            recent['sell_time'] = recent['sell_time'].apply(lambda x: x[-8:-3] if isinstance(x, str) else x)
-            print(recent.to_string(index=False))
+            # 获取最近5笔交易
+            recent_trades = normalized_history[-5:] if len(normalized_history) >= 5 else normalized_history
+            print(f"{'时间':<8} {'币种':<12} {'收益率':<10} {'离场原因'}")
+            print("-" * 50)
+            for trade in recent_trades:
+                time_str = trade['sell_time'][-8:-3] if isinstance(trade['sell_time'], str) and len(trade['sell_time']) > 5 else trade['sell_time']
+                pnl_str = f"{trade['pnl_pct']:+.2f}%"
+                print(f"{time_str:<8} {trade['symbol']:<12} {pnl_str:<10} {trade['exit_reason']}")
 
         print("="*40 + "\n")
 

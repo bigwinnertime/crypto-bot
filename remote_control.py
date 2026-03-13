@@ -4,8 +4,12 @@ import config
 import os
 import ccxt
 import time
+import logging
 from dotenv import load_dotenv
 from risk_manager import RiskManager
+from state_manager import state_mgr
+
+logger = logging.getLogger("TradingBot.Remote")
 risk = RiskManager()
 
 load_dotenv()
@@ -113,22 +117,7 @@ def update_trailing_stop(message):
     except Exception as e:
         bot.reply_to(message, "⚠️ 格式: `/set_ts BTC/USDT 0.01`", parse_mode='Markdown')
 
-# --- 4. 止损设置处理器 (同样的逻辑) ---
-@bot.message_handler(commands=['set_sl'])
-def update_stop_loss(message):
-    if not auth(message): return
-    try:
-        _, symbol, value = message.text.split()
-        symbol = symbol.upper()
-        sl_val = float(value)
-
-        risk.update_runtime_config(symbol, 'stop_loss_pct', sl_val)
-        
-        bot.reply_to(message, f"✅ `{symbol}` 止损已更新为: `{sl_val*100}%`", parse_mode='Markdown')
-    except:
-        bot.reply_to(message, "⚠️ 格式: `/set_sl BTC/USDT 0.02`", parse_mode='Markdown')
-
-# --- 5.紧急熔断指令 (/fuse) ---
+# --- 4. 紧急熔断指令 (/fuse) ---
 @bot.message_handler(commands=['fuse'])
 def handle_emergency_fuse(message):
     if not auth(message): return
@@ -138,7 +127,7 @@ def handle_emergency_fuse(message):
     
     bot.reply_to(message, "🚨 **紧急熔断已启动！**\n状态已写入 `bot_state.json`。主程序将在下一轮循环检测到并停止交易。")
 
-# --- 6. 解除熔断指令 (/unfuse) ---
+# --- 5. 解除熔断指令 (/unfuse) ---
 @bot.message_handler(commands=['unfuse'])
 def handle_unfuse(message):
     if not auth(message): return
@@ -150,5 +139,5 @@ def handle_unfuse(message):
 
 # 启动监听
 def start_remote_listener():
-    print("📡 远程调参监听器已启动...")
+    logger.info("📡 远程调参监听器已启动...")
     bot.infinity_polling(timeout=90, long_polling_timeout=5)

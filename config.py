@@ -36,8 +36,8 @@ STRATEGY_CONFIG = {
         'rsi_oversold': 40,
         'rsi_overbought': 75,
         'trade_amount': 20,
-        'stop_loss_pct': 0.05,     # 2% 固定硬止损
-        'trailing_stop_pct': 0.4 # 1.5% 追踪止盈回调
+        'stop_loss_pct': 0.05,     # 5% 固定硬止损
+        'trailing_stop_pct': 0.04 # 4% 追踪止盈回调 (修复：原值0.4过高)
     },
     'SOL/USDT': {
         'adx_threshold': 35,    # SOL 波动剧烈，需要 35 以上的高强度才追涨，防止被骗炮

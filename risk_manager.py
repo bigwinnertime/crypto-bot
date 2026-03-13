@@ -66,7 +66,7 @@ class RiskManager:
 
             except (json.JSONDecodeError, Exception) as e:
                 # 如果文件损坏或其他异常，安全返回默认值
-                print(f"⚠️ 读取状态文件异常，已加载默认设置: {e}")
+                logger.warning(f"⚠️ 读取状态文件异常，已加载默认设置: {e}")
                 return defaults
 
     def save_state(self):
@@ -96,8 +96,11 @@ class RiskManager:
         
         # 检查熔断是否过期
         if self.state['is_fused']:
+            # 使用配置文件中的熔断持续时间
+            import config
+            fuse_duration = getattr(config, 'FUSE_DURATION', 14400)  # 默认4小时
             elapsed = time.time() - self.state['fuse_time']
-            if elapsed > 14400: # 4小时
+            if elapsed > fuse_duration:
                 logger.info("🛡️ 熔断冷却期结束，系统尝试恢复监控。")
                 self.state['is_fused'] = False
                 self.save_state()
