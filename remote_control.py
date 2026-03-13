@@ -95,7 +95,51 @@ def update_stop_loss(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ 格式错误或执行异常: {e}")
 
-# --- 3. 追踪止盈设置处理器 ---
+# --- 3. 查看追踪止盈状态处理器 ---
+@bot.message_handler(commands=['trailing_status'])
+def get_trailing_status(message):
+    if not auth(message): return
+    
+    try:
+        # 获取所有持仓的状态
+        positions = risk.state['positions']
+        if not positions:
+            bot.reply_to(message, "📊 当前无持仓")
+            return
+        
+        status_report = "📊 **追踪止盈状态报告**\n\n"
+        
+        for symbol in positions:
+            # 模拟获取当前价格（实际应该从交易所获取）
+            current_price = positions[symbol]['highest_price']  # 简化处理
+            
+            status = risk.get_trailing_stop_status(symbol, current_price)
+            if status:
+                status_report += f"🔸 **{symbol}**\n"
+                status_report += f"入场价: {status['entry_price']:.2f}\n"
+                status_report += f"当前价: {status['current_price']:.2f}\n"
+                status_report += f"最高价: {status['highest_price']:.2f}\n"
+                status_report += f"最高盈利: {status['highest_profit_pct']:+.2%}\n"
+                status_report += f"当前回撤: {status['current_drawdown_pct']:+.2%}\n"
+                
+                if status['active_trigger_drawdown']:
+                    status_report += f"触发回撤阈值: {status['active_trigger_drawdown']:.2%}"
+                    if status['time_multiplier']:
+                        status_report += f" (时间系数: {status['time_multiplier']:.2f})\n"
+                        status_report += f"调整后阈值: {status['adjusted_trigger_drawdown']:.2%}\n"
+                    else:
+                        status_report += "\n"
+                else:
+                    status_report += "追踪止盈: 未激活\n"
+                
+                status_report += f"持仓时间: {status['holding_time_hours']:.1f}小时\n\n"
+        
+        bot.reply_to(message, status_report, parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ 获取状态失败: {e}")
+
+# --- 4. 追踪止盈设置处理器 ---
 @bot.message_handler(commands=['set_ts'])
 def update_trailing_stop(message):
     if not auth(message): return

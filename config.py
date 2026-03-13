@@ -28,8 +28,56 @@ STRATEGY_CONFIG = {
         'rsi_oversold': 40,
         'rsi_overbought': 75,
         'trade_amount': 30,      # BTC 可以仓位稍大
-        'stop_loss_pct': 0.03,     # 2% 固定硬止损
-        'trailing_stop_pct': 0.02 # 1.5% 追踪止盈回调
+        'stop_loss_pct': 0.03,     # 3% 固定硬止损
+        
+        # 成交量确认参数
+        'volume_threshold': 1.5,    # 成交量需大于均值的1.5倍
+        'volume_ma_period': 20,     # 成交量均线周期
+        
+        # ATR动态止损参数
+        'atr_period': 14,          # ATR计算周期
+        'atr_multiplier': 2.0,     # ATR止损倍数（动态止损 = 入场价 - ATR * multiplier）
+        'use_atr_stop': True,      # 是否使用ATR动态止损
+        
+        # 波动率适配参数
+        'volatility_adjust': {
+            'enabled': True,
+            'low_vol_threshold': 0.02,    # 低波动阈值（ATR% < 2%）
+            'high_vol_threshold': 0.05,   # 高波动阈值（ATR% > 5%）
+            'low_vol_multiplier': 0.8,    # 低波动时参数缩小
+            'high_vol_multiplier': 1.2,   # 高波动时参数放大
+        },
+        
+        # 分阶段追踪止盈配置
+        'trailing_stops': [
+            {
+                'profit_threshold': 0.02,      # 盈利2%时开启追踪
+                'trigger_drawdown': 0.02,     # 回撤2%时触发卖出
+                'trailing_pct': 0.015         # 历史追踪比例（向后兼容）
+            },
+            {
+                'profit_threshold': 0.05,      # 盈利5%时开启追踪
+                'trigger_drawdown': 0.025,    # 回撤2.5%时触发卖出
+                'trailing_pct': 0.02
+            },
+            {
+                'profit_threshold': 0.10,      # 盈利10%时开启追踪
+                'trigger_drawdown': 0.03,     # 回撤3%时触发卖出
+                'trailing_pct': 0.025
+            },
+        ],
+        
+        # 时间衰减配置
+        'time_decay': {
+            'enabled': True,
+            'intervals': [
+                {'hours': 1, 'multiplier': 1.0},    # 1小时内，不调整
+                {'hours': 4, 'multiplier': 0.8},    # 1-4小时，追踪比例×0.8
+                {'hours': 12, 'multiplier': 0.6},   # 4-12小时，追踪比例×0.6
+                {'hours': 24, 'multiplier': 0.5},   # 12-24小时，追踪比例×0.5
+                {'hours': float('inf'), 'multiplier': 0.4}  # 24小时以上，追踪比例×0.4
+            ]
+        }
     },
     'ETH/USDT': {
         'adx_threshold': 30,
@@ -37,15 +85,111 @@ STRATEGY_CONFIG = {
         'rsi_overbought': 75,
         'trade_amount': 20,
         'stop_loss_pct': 0.05,     # 5% 固定硬止损
-        'trailing_stop_pct': 0.04 # 4% 追踪止盈回调 (修复：原值0.4过高)
+        
+        # 成交量确认参数
+        'volume_threshold': 1.5,
+        'volume_ma_period': 20,
+        
+        # ATR动态止损参数
+        'atr_period': 14,
+        'atr_multiplier': 2.0,
+        'use_atr_stop': True,
+        
+        # 波动率适配参数
+        'volatility_adjust': {
+            'enabled': True,
+            'low_vol_threshold': 0.02,
+            'high_vol_threshold': 0.05,
+            'low_vol_multiplier': 0.8,
+            'high_vol_multiplier': 1.2,
+        },
+        
+        # 分阶段追踪止盈配置
+        'trailing_stops': [
+            {
+                'profit_threshold': 0.03,      # 盈利3%时开启追踪
+                'trigger_drawdown': 0.02,     # 回撤2%时触发卖出
+                'trailing_pct': 0.02          # 历史追踪比例（向后兼容）
+            },
+            {
+                'profit_threshold': 0.06,      # 盈利6%时开启追踪
+                'trigger_drawdown': 0.025,    # 回撤2.5%时触发卖出
+                'trailing_pct': 0.025
+            },
+            {
+                'profit_threshold': 0.12,      # 盈利12%时开启追踪
+                'trigger_drawdown': 0.03,     # 回撤3%时触发卖出
+                'trailing_pct': 0.03
+            },
+        ],
+        
+        # 时间衰减配置
+        'time_decay': {
+            'enabled': True,
+            'intervals': [
+                {'hours': 1, 'multiplier': 1.0},
+                {'hours': 4, 'multiplier': 0.8},
+                {'hours': 12, 'multiplier': 0.6},
+                {'hours': 24, 'multiplier': 0.5},
+                {'hours': float('inf'), 'multiplier': 0.4}
+            ]
+        }
     },
     'SOL/USDT': {
-        'adx_threshold': 35,    # SOL 波动剧烈，需要 35 以上的高强度才追涨，防止被骗炮
+        'adx_threshold': 30,    # SOL 波动剧烈，需要 35 以上的高强度才追涨，防止被骗炮
         'rsi_oversold': 25,     # 跌得更深才买入
         'rsi_overbought': 80,   # 涨得更高才卖出
         'trade_amount': 10,      # 高波动币种减小单笔金额
         'stop_loss_pct': 0.05,     # 5% 固定硬止损
-        'trailing_stop_pct': 0.04  # 4% 追踪止盈回调
+        
+        # 成交量确认参数
+        'volume_threshold': 2.0,    # SOL波动大，需要更高的成交量确认
+        'volume_ma_period': 20,
+        
+        # ATR动态止损参数
+        'atr_period': 14,
+        'atr_multiplier': 2.5,     # SOL波动大，ATR倍数提高
+        'use_atr_stop': True,
+        
+        # 波动率适配参数
+        'volatility_adjust': {
+            'enabled': True,
+            'low_vol_threshold': 0.03,    # SOL的低波动阈值更高
+            'high_vol_threshold': 0.08,   # SOL的高波动阈值更高
+            'low_vol_multiplier': 0.8,
+            'high_vol_multiplier': 1.3,   # 高波动时参数放大更多
+        },
+        
+        # 分阶段追踪止盈配置
+        'trailing_stops': [
+            {
+                'profit_threshold': 0.04,      # 盈利4%时开启追踪
+                'trigger_drawdown': 0.025,    # 回撤2.5%时触发卖出
+                'trailing_pct': 0.025         # 历史追踪比例（向后兼容）
+            },
+            {
+                'profit_threshold': 0.08,      # 盈利8%时开启追踪
+                'trigger_drawdown': 0.03,     # 回撤3%时触发卖出
+                'trailing_pct': 0.03
+            },
+            {
+                'profit_threshold': 0.15,      # 盈利15%时开启追踪
+                'trigger_drawdown': 0.035,    # 回撤3.5%时触发卖出
+                'trailing_pct': 0.035
+            },
+        ],
+        
+        # 时间衰减配置
+        'time_decay': {
+            'enabled': True,
+            'intervals': [
+                {'hours': 1, 'multiplier': 1.0},
+                {'hours': 4, 'multiplier': 0.8},
+                {'hours': 12, 'multiplier': 0.6},
+                {'hours': 24, 'multiplier': 0.5},
+                {'hours': float('inf'), 'multiplier': 0.4}
+            ]
+        }
     }
 }
 
@@ -56,7 +200,55 @@ DEFAULT_CONFIG = {
     'rsi_overbought': 70,
     'trade_amount': 10,
     'stop_loss_pct': 0.03,
-    'trailing_stop_pct': 0.02
+    
+    # 成交量确认参数
+    'volume_threshold': 1.5,
+    'volume_ma_period': 20,
+    
+    # ATR动态止损参数
+    'atr_period': 14,
+    'atr_multiplier': 2.0,
+    'use_atr_stop': True,
+    
+    # 波动率适配参数
+    'volatility_adjust': {
+        'enabled': True,
+        'low_vol_threshold': 0.02,
+        'high_vol_threshold': 0.05,
+        'low_vol_multiplier': 0.8,
+        'high_vol_multiplier': 1.2,
+    },
+    
+    # 默认分阶段追踪止盈配置
+    'trailing_stops': [
+        {
+            'profit_threshold': 0.02,      # 盈利2%时开启追踪
+            'trigger_drawdown': 0.015,    # 回撤1.5%时触发卖出
+            'trailing_pct': 0.015         # 历史追踪比例（向后兼容）
+        },
+        {
+            'profit_threshold': 0.05,      # 盈利5%时开启追踪
+            'trigger_drawdown': 0.02,     # 回撤2%时触发卖出
+            'trailing_pct': 0.02
+        },
+        {
+            'profit_threshold': 0.10,      # 盈利10%时开启追踪
+            'trigger_drawdown': 0.025,    # 回撤2.5%时触发卖出
+            'trailing_pct': 0.025
+        },
+    ],
+    
+    # 默认时间衰减配置
+    'time_decay': {
+        'enabled': True,
+        'intervals': [
+            {'hours': 1, 'multiplier': 1.0},
+            {'hours': 4, 'multiplier': 0.8},
+            {'hours': 12, 'multiplier': 0.6},
+            {'hours': 24, 'multiplier': 0.5},
+            {'hours': float('inf'), 'multiplier': 0.4}
+        ]
+    }
 }
 
 # --- 风险控制参数 ---

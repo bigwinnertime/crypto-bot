@@ -97,16 +97,39 @@ class AdvancedTradingBot:
         sma_short = SMAIndicator(df['close'], window=20).sma_indicator().iloc[-1]
         sma_long = SMAIndicator(df['close'], window=60).sma_indicator().iloc[-1]
         price = df['close'].iloc[-1]
-
+        
+        # 3. 计算ATR和波动率（用于动态参数调整）
+        from ta.volatility import AverageTrueRange
+        atr = AverageTrueRange(df['high'], df['low'], df['close'], 
+                               window=spec.get('atr_period', 14)).average_true_range().iloc[-1]
+        atr_pct = atr / price  # ATR百分比（波动率指标）
+        
+        # 4. 成交量分析
+        current_volume = df['volume'].iloc[-1]
+        volume_ma = df['volume'].rolling(window=spec.get('volume_ma_period', 20)).mean().iloc[-1]
+        volume_ratio = current_volume / volume_ma if volume_ma > 0 else 0
+        
+        # 5. 动态参数调整（根据波动率）
+        adjusted_params = self._adjust_params_by_volatility(spec, atr_pct)
+        
         # 辅助日志：每轮巡检的基础状态（可选，如果嫌日志太多可以注释掉）
-        logger.debug(f"📊 {symbol} 状态扫描: Price:{price:.2f}, ADX:{adx:.1f}, RSI:{rsi:.1f}")
+        logger.debug(f"📊 {symbol} 状态扫描: Price:{price:.2f}, ADX:{adx:.1f}, RSI:{rsi:.1f}, ATR%:{atr_pct:.2%}, VolRatio:{volume_ratio:.2f}")
+        
         # --- 逻辑 A：强趋势模式 (ADX > 阈值) ---
-        if adx > spec['adx_threshold']:
+        if adx > adjusted_params['adx_threshold']:
             mode_str = "【趋势模式】"
-            # 增加条件判断日志
+            
+            # 买入信号：需要成交量确认
             if price > sma_short and sma_short > sma_long:
-                logger.debug(f"📈 {symbol} {mode_str} 触发买入 | 原因: 价格 > SMA20({sma_short:.2f}) 且 均线多头排列(SMA20 > SMA60)")
-                return "BUY", "TREND_STRENGTH"
+                # 成交量确认：当前成交量需大于均值的threshold倍
+                volume_confirmed = volume_ratio >= spec.get('volume_threshold', 1.5)
+                
+                if volume_confirmed:
+                    logger.debug(f"📈 {symbol} {mode_str} 触发买入 | 原因: 价格 > SMA20({sma_short:.2f}) 且 均线多头排列 | 成交量确认: {volume_ratio:.2f}x")
+                    return "BUY", "TREND_STRENGTH"
+                else:
+                    logger.debug(f"⚠️ {symbol} {mode_str} 买入信号但成交量不足 | VolRatio:{volume_ratio:.2f} < 阈值{spec.get('volume_threshold', 1.5)}")
+                    return "HOLD", "LOW_VOLUME"
 
             if price < sma_long:
                 logger.debug(f"📉 {symbol} {mode_str} 触发卖出 | 原因: 价格跌破 SMA60({sma_long:.2f}) 趋势终结")
@@ -115,15 +138,61 @@ class AdvancedTradingBot:
         # --- 逻辑 B：弱势/震荡模式 (ADX <= 阈值) ---
         else:
             mode_str = "【震荡模式】"
-            if rsi < spec['rsi_oversold']:
-                logger.debug(f"底部反弹 {symbol} {mode_str} 触发买入 | 原因: RSI({rsi:.1f}) < 阈值({spec['rsi_oversold']})")
-                return "BUY", "MEAN_REVERSION"
+            
+            # 震荡买入：需要成交量确认
+            if rsi < adjusted_params['rsi_oversold']:
+                volume_confirmed = volume_ratio >= spec.get('volume_threshold', 1.5) * 0.8  # 震荡模式成交量要求稍低
+                
+                if volume_confirmed:
+                    logger.debug(f"底部反弹 {symbol} {mode_str} 触发买入 | 原因: RSI({rsi:.1f}) < 阈值({adjusted_params['rsi_oversold']}) | 成交量确认: {volume_ratio:.2f}x")
+                    return "BUY", "MEAN_REVERSION"
+                else:
+                    logger.debug(f"⚠️ {symbol} {mode_str} 买入信号但成交量不足 | VolRatio:{volume_ratio:.2f}")
+                    return "HOLD", "LOW_VOLUME"
 
-            if rsi > spec['rsi_overbought']:
-                logger.debug(f"顶部回落 {symbol} {mode_str} 触发卖出 | 原因: RSI({rsi:.1f}) > 阈值({spec['rsi_overbought']})")
+            if rsi > adjusted_params['rsi_overbought']:
+                logger.debug(f"顶部回落 {symbol} {mode_str} 触发卖出 | 原因: RSI({rsi:.1f}) > 阈值({adjusted_params['rsi_overbought']})")
                 return "SELL", "RANGE_EXIT"
 
         return "HOLD", "NONE"
+    
+    def _adjust_params_by_volatility(self, spec, atr_pct):
+        """根据波动率动态调整参数"""
+        vol_adjust = spec.get('volatility_adjust', {})
+        
+        if not vol_adjust.get('enabled', False):
+            return spec
+        
+        # 获取阈值和倍数
+        low_vol_threshold = vol_adjust.get('low_vol_threshold', 0.02)
+        high_vol_threshold = vol_adjust.get('high_vol_threshold', 0.05)
+        low_vol_multiplier = vol_adjust.get('low_vol_multiplier', 0.8)
+        high_vol_multiplier = vol_adjust.get('high_vol_multiplier', 1.2)
+        
+        # 根据波动率调整参数
+        adjusted = spec.copy()
+        
+        if atr_pct < low_vol_threshold:
+            # 低波动：缩小参数（更严格的进场条件）
+            multiplier = low_vol_multiplier
+            logger.debug(f"📉 低波动市场 (ATR%:{atr_pct:.2%})，参数调整系数: {multiplier}")
+        elif atr_pct > high_vol_threshold:
+            # 高波动：放大参数（更宽松的止损/止盈）
+            multiplier = high_vol_multiplier
+            logger.debug(f"📈 高波动市场 (ATR%:{atr_pct:.2%})，参数调整系数: {multiplier}")
+        else:
+            # 正常波动：不调整
+            return spec
+        
+        # 调整关键参数
+        if 'adx_threshold' in adjusted:
+            adjusted['adx_threshold'] = spec['adx_threshold'] * multiplier
+        if 'rsi_oversold' in adjusted:
+            adjusted['rsi_oversold'] = spec['rsi_oversold'] * multiplier
+        if 'rsi_overbought' in adjusted:
+            adjusted['rsi_overbought'] = spec['rsi_overbought'] / multiplier
+        
+        return adjusted
 
     def _execute_order(self, symbol, side, amount, price, mode):
         """
@@ -194,8 +263,8 @@ class AdvancedTradingBot:
                     price = df['close'].iloc[-1]
                     pos = self.risk.state['positions'].get(symbol)
 
-                    # --- 第一步：风控检查（追踪止盈/硬止损） ---
-                    stop_reason = self.risk.update_trailing_stop(symbol, price)
+                    # --- 第一步：风控检查（追踪止盈/硬止损/ATR止损） ---
+                    stop_reason = self.risk.update_trailing_stop(symbol, price, df)
                     if stop_reason:
                         # 使用拦截器执行模拟/实盘卖出
                         if self._execute_order(symbol, 'sell', pos.get('amount', 0), price, stop_reason):
