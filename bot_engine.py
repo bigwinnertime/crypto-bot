@@ -74,7 +74,7 @@ class AdvancedTradingBot:
             # 显式清理 symbol 字符串，防止多余空格
             clean_symbol = symbol.strip()
             bars = self.exchange.fetch_ohlcv(clean_symbol, timeframe=config.TIMEFRAME, limit=100)
-            df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+            df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
 
             # --- 压力测试注入：模拟 10% 暴跌 ---
             #if clean_symbol == 'BTC/USDT':
