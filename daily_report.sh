@@ -1,6 +1,6 @@
 #!/bin/bash
 # 1. 设置项目根目录的绝对路径（请根据实际情况修改）
-PROJECT_DIR="/root/project/auto_trade/crypto_bot"
+PROJECT_DIR="/root/project/auto_trade/crypto-bot"
 # 2. 设置 Conda 环境中 Python 的绝对路径
 PYTHON_EXEC="/root/miniconda3/envs/crypto_bot/bin/python"
 
