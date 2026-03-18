@@ -188,48 +188,84 @@ crypto-bot/
 ### 环境要求
 
 - Python 3.8+
+- Miniconda3 (推荐)
 - pip 包管理器
 
 ### 安装步骤
 
-1. **克隆项目**
+#### 1. 创建并激活虚拟环境 (Miniconda3)
+
+```bash
+# 创建新的虚拟环境
+conda create -n crypto-bot python=3.11
+
+# 激活虚拟环境
+conda activate crypto-bot
+```
+
+#### 2. 克隆项目
+
 ```bash
 git clone https://github.com/yourusername/crypto-bot.git
 cd crypto-bot
 ```
 
-2. **安装依赖**
+#### 3. 安装依赖
+
 ```bash
+# 使用 requirements.txt 安装 (推荐)
 pip install -r requirements.txt
+
+# 或手动安装各个依赖
+pip install ccxt pandas python-dotenv ta pyTelegramBotAPI
 ```
 
-3. **配置 API 密钥**
+#### 4. 配置 API 密钥
 
-编辑 `config.py`，填入您的 API 密钥：
-```python
+创建 `.env` 文件并填入您的 API 密钥：
+```bash
+cp .env.example .env  # 如果有模板文件
+```
+
+编辑 `.env` 文件：
+```bash
 # 交易所 API 配置
-API_KEY = 'your_api_key_here'
-API_SECRET = 'your_api_secret_here'
+API_KEY=your_api_key_here
+API_SECRET=your_api_secret_here
 
 # Telegram Bot 配置
-TELEGRAM_BOT_TOKEN = 'your_bot_token'
-TELEGRAM_CHAT_ID = 'your_chat_id'
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
 
 # 邮件通知配置
-MAIL_USER = 'your_email@gmail.com'
-MAIL_PASS = 'your_email_password'
+MAIL_USER=your_email@gmail.com
+MAIL_PASS=your_email_password
 ```
 
-4. **选择交易模式**
+#### 5. 选择交易模式
+
+编辑 `config.py`：
 ```python
-# config.py
 LIVE_TRADE = False  # True: 实盘交易 | False: 模拟交易
 ```
 
-5. **启动机器人**
+#### 6. 启动机器人
+
 ```bash
 python bot_engine.py
 ```
+
+### 依赖库说明
+
+本项目依赖以下核心库：
+
+| 库名 | 版本要求 | 用途 |
+|------|----------|------|
+| **ccxt** | >=4.0.0 | 交易所API接口，支持多家主流交易所 |
+| **pandas** | >=2.0.0 | 数据处理和分析，K线数据管理 |
+| **python-dotenv** | >=1.0.0 | 环境变量管理，保护API密钥安全 |
+| **ta** | >=0.10.0 | 技术分析库，提供RSI、ADX、ATR等指标 |
+| **pyTelegramBotAPI** | >=4.10.0 | Telegram机器人API，远程控制接口 |
 
 ### 模拟交易测试
 
@@ -242,6 +278,24 @@ python bot_engine.py
     "trade_count": 0
   }
 }
+```
+
+### 常见问题解决
+
+#### Q: 依赖安装失败？
+```bash
+# 升级pip
+pip install --upgrade pip
+
+# 使用国内镜像源
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+```
+
+#### Q: conda环境激活失败？
+```bash
+# 初始化conda (如果未初始化)
+conda init zsh  # 或 bash, fish
+source ~/.zshrc  # 重启终端或重新加载配置
 ```
 
 ---
