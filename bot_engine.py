@@ -32,8 +32,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        # 显式指定编码并增加错误处理模式
-        logging.FileHandler("bot_main.log", encoding='utf-8', errors='replace'), 
+        # 主交易日志
+        logging.FileHandler("bot_main.log", encoding='utf-8', errors='replace'),
+        # 运行状态日志
+        logging.FileHandler("bot_run.log", encoding='utf-8', errors='replace'),
+        # 控制台输出
         logging.StreamHandler(sys.stdout)
     ]
 )
