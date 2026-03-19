@@ -5,6 +5,7 @@ import os
 import ccxt
 import time
 import logging
+import threading
 from dotenv import load_dotenv
 from risk_manager import RiskManager
 from state_manager import state_mgr
@@ -14,8 +15,20 @@ risk = RiskManager()
 
 load_dotenv()
 
+# 单例模式：确保只有一个 bot 实例
+_bot_instance = None
+_bot_lock = threading.Lock()
+
+def get_bot_instance():
+    global _bot_instance
+    if _bot_instance is None:
+        with _bot_lock:
+            if _bot_instance is None:
+                _bot_instance = telebot.TeleBot(os.getenv('TELEGRAM_TOKEN'))
+    return _bot_instance
+
 # 初始化 Bot
-bot = telebot.TeleBot(os.getenv('TELEGRAM_TOKEN'))
+bot = get_bot_instance()
 ADMIN_ID = int(os.getenv('TELEGRAM_CHAT_ID'))
 
 # 提取私钥并处理换行符
@@ -183,5 +196,39 @@ def handle_unfuse(message):
 
 # 启动监听
 def start_remote_listener():
-    logger.info("📡 远程调参监听器已启动...")
-    bot.infinity_polling(timeout=90, long_polling_timeout=5)
+    # 进程锁：防止多个实例同时运行
+    lock_file = "telegram_bot.lock"
+    
+    try:
+        # 检查锁文件
+        if os.path.exists(lock_file):
+            logger.warning("⚠️ 检测到其他 bot 实例正在运行，跳过启动")
+            return
+        
+        # 创建锁文件
+        with open(lock_file, 'w') as f:
+            f.write(str(os.getpid()))
+        
+        logger.info("📡 远程调参监听器已启动...")
+        
+        # 使用 webhook 模式避免轮询冲突
+        try:
+            # 先停止任何现有的轮询
+            bot.stop_polling()
+            # 使用非阻塞轮询模式
+            bot.polling(none_stop=True, interval=3, timeout=60)
+        except Exception as e:
+            logger.error(f"Telegram bot polling error: {e}")
+            # 如果出错，等待后重试
+            time.sleep(5)
+            start_remote_listener()
+            
+    except KeyboardInterrupt:
+        logger.info("👋 Bot 监听器已停止")
+    finally:
+        # 清理锁文件
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+            except:
+                pass

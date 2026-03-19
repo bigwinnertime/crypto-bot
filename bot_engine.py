@@ -10,6 +10,10 @@ os.environ['PYTHONIOENCODING'] = 'utf-8'
 if hasattr(sys, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
+# 立即加载环境变量
+from dotenv import load_dotenv
+load_dotenv()
+
 import ccxt
 import pandas as pd
 import time
@@ -240,6 +244,20 @@ class AdvancedTradingBot:
             self.risk.save_state()
             return True
 
+        # 实盘模式：执行真实订单
+        try:
+            if side == 'buy':
+                order = self.exchange.create_market_buy_order(symbol, amount)
+                logger.info(f"✅ [实盘买入] {symbol} 订单已执行: {order['id']}")
+                return True
+            elif side == 'sell':
+                order = self.exchange.create_market_sell_order(symbol, amount)
+                logger.info(f"✅ [实盘卖出] {symbol} 订单已执行: {order['id']}")
+                return True
+        except Exception as e:
+            logger.error(f"❌ [实盘{side}] 订单执行失败: {e}")
+            return False
+
     def run(self):
         logger.info(f"🚀 系统已启动 (当前模式: {'实盘' if config.LIVE_TRADE else '测试/模拟'})")
         while True:
@@ -290,13 +308,17 @@ class AdvancedTradingBot:
                         amount = trade_amount / price
                         
                         # 调用统一拦截器
+                        logger.info(f"📤 准备执行买入订单: {symbol}, 金额: {trade_amount}, 价格: {price:.2f}")
                         if self._execute_order(symbol, 'buy', amount, price, mode):
+                            logger.info(f"✅ _execute_order 返回 True，开始更新持仓状态")
                             self.risk.execute_buy_update(symbol, price, amount, trade_amount, mode)
-
+                            logger.info(f"✅ 持仓状态更新完成，准备发送通知")
+                            
                             # 发送通知
                             safe_mode = mode.replace("_", " ")
-                            #self.notifier.send_email(f"✅ 买入成交: {symbol}", f"价格: {price}\n模式: {mode}")
-                            send_notification(f"✅  买入成交: {symbol}", f"*价格*: {price}\n*模式*: {safe_mode}")
+                            logger.info(f"📤 正在调用 send_notification: 标题='✅  买入成交: {symbol}'")
+                            result = send_notification(f"✅  买入成交: {symbol}", f"*价格*: {price}\n*模式*: {safe_mode}", sync=False)
+                            logger.info(f"📤 send_notification 调用完成，返回值: {result}")
 
                     # 执行策略卖出（RSI超买等信号）
                     elif signal == "SELL" and pos:
@@ -305,7 +327,7 @@ class AdvancedTradingBot:
 
                             # 发送通知
                             #self.notifier.send_email(f"🔻 卖出成交: {symbol}", f"收益率: {pnl:.2f}%")
-                            send_notification(f"🔻 卖出成交: {symbol}", f"*收益率*: {pnl:.2f}%")
+                            send_notification(f"🔻 卖出成交: {symbol}", f"*收益率*: {pnl:.2f}%", sync=False)
 
                 time.sleep(60) 
             except Exception as e:
