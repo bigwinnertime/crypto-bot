@@ -1,8 +1,6 @@
 import requests
 import config
 import logging
-import threading
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -11,20 +9,6 @@ class TelegramNotifier:
         self.token = config.TELEGRAM_TOKEN
         self.chat_id = config.TELEGRAM_CHAT_ID
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-
-    def send_msg_async(self, text):
-        """异步发送消息，避免阻塞主线程"""
-        def send_in_background():
-            try:
-                self.send_msg(text)
-            except Exception as e:
-                logger.error(f"异步发送TG通知异常: {e}")
-        
-        thread = threading.Thread(target=send_in_background, daemon=True)
-        thread.start()
-        # 等待一小段时间确保线程启动
-        time.sleep(0.1)
-        return True
 
     def send_msg(self, text):
         """发送纯文本消息"""
@@ -51,12 +35,9 @@ class TelegramNotifier:
             logger.error(f"TG通知未知异常: {e}")
             return False
 
-    def send_msg_sync(self, text):
-        """同步发送消息（用于测试）"""
-        return self.send_msg(text)
 
 # 为了方便，你可以保持函数名一致，减少主程序改动
-def send_notification(title, content, sync=False):
+def send_notification(title, content):
     notifier = TelegramNotifier()
     logger = logging.getLogger(__name__)
     
@@ -74,18 +55,35 @@ def send_notification(title, content, sync=False):
     logger.info(f"📤 准备发送TG通知: {title}")
     logger.info(f"🔑 Token前8位: {notifier.token[:8]}... Chat ID: {notifier.chat_id}")
     
-    # 根据参数选择同步或异步发送
+    # 同步发送
     try:
-        if sync:
-            # 同步发送（用于测试）
-            result = notifier.send_msg_sync(formatted_msg)
-            logger.info(f"✅ 同步发送完成，结果: {result}")
-            return result
-        else:
-            # 异步发送，避免阻塞主线程
-            notifier.send_msg_async(formatted_msg)
-            logger.info(f"✅ 异步发送线程已启动")
-            return True
+        result = notifier.send_msg(formatted_msg)
+        logger.info(f"✅ 发送完成，结果: {result}")
+        return result
     except Exception as e:
-        logger.error(f"❌ 启动发送线程失败: {e}")
+        logger.error(f"❌ 发送失败: {e}")
         return False
+
+if __name__ == "__main__":
+    # 配置独立运行的日志
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.FileHandler("telegram_notifier.log", encoding='utf-8', errors='replace'),
+            logging.StreamHandler()
+        ]
+    )
+    
+    # 测试代码
+    logger.info("🧪 开始测试 Telegram 通知功能...")
+    
+    # 测试发送
+    test_title = "🧪 测试消息"
+    test_content = "这是一条测试消息，用于验证 Telegram 通知功能是否正常工作。\n\n时间: " + __import__('time').strftime('%Y-%m-%d %H:%M:%S')
+    
+    logger.info("📤 测试发送...")
+    result = send_notification(test_title, test_content)
+    logger.info(f"✅ 发送结果: {result}")
+    
+    logger.info("🏁 测试完成!")
