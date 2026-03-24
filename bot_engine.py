@@ -317,7 +317,7 @@ class AdvancedTradingBot:
                             # 发送通知
                             safe_mode = mode.replace("_", " ")
                             logger.info(f"📤 正在调用 send_notification: 标题='✅  买入成交: {symbol}'")
-                            result = send_notification(f"✅  买入成交: {symbol}", f"*价格*: {price}\n*模式*: {safe_mode}", sync=False)
+                            result = send_notification(f"✅  买入成交: {symbol}", f"*价格*: {price}\n*模式*: {safe_mode}")
                             logger.info(f"📤 send_notification 调用完成，返回值: {result}")
 
                     # 执行策略卖出（RSI超买等信号）
@@ -327,7 +327,7 @@ class AdvancedTradingBot:
 
                             # 发送通知
                             #self.notifier.send_email(f"🔻 卖出成交: {symbol}", f"收益率: {pnl:.2f}%")
-                            send_notification(f"🔻 卖出成交: {symbol}", f"*收益率*: {pnl:.2f}%", sync=False)
+                            send_notification(f"🔻 卖出成交: {symbol}", f"*收益率*: {pnl:.2f}%")
 
                 time.sleep(60) 
             except Exception as e:

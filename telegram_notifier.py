@@ -37,7 +37,8 @@ class TelegramNotifier:
 
 
 # 为了方便，你可以保持函数名一致，减少主程序改动
-def send_notification(title, content):
+def send_notification(title, content, **kwargs):
+    """发送 Telegram 通知，**kwargs 用于兼容未来扩展参数"""
     notifier = TelegramNotifier()
     logger = logging.getLogger(__name__)
     
