@@ -427,11 +427,8 @@ class RiskManager:
                 self.state['trade_history'] = []
             self.state['trade_history'].append(trade_record)
             
-            # 3. 更新虚拟账户总统计
-            self.state['virtual_account']['total_pnl'] += pnl_val
-            self.state['virtual_account']['trade_count'] += 1
-            
-            # 4. 移除持仓并保存
+            # 3. 移除持仓并保存
+            # 注：total_pnl 和 trade_count 已在 _execute_order 的模拟卖出一并更新，避免重复累加
             del self.state['positions'][symbol]
             self.save_state()
             

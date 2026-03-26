@@ -293,8 +293,8 @@ class AdvancedTradingBot:
                             pnl = (price / pos['entry_price'] - 1) * 100
                             # self.notifier.send_email(f"🆘 离场通知: {symbol}", f"原因: {stop_reason}\n收益率: {pnl:.2f}%")
                             send_notification(f"🆘  离场通知: {symbol}", f"*原因*: {stop_reason}\n*收益率*: {pnl:.2f}%")
-                            del self.risk.state['positions'][symbol]
-                            self.risk.save_state()
+                            # 执行卖出后状态更新（记录交易历史、删除持仓），内部会保存状态
+                            self.risk.execute_sell_update(symbol, price, stop_reason)
                         continue
 
                     # --- 第二步：策略信号判定 ---
@@ -327,7 +327,7 @@ class AdvancedTradingBot:
 
                             # 发送通知
                             #self.notifier.send_email(f"🔻 卖出成交: {symbol}", f"收益率: {pnl:.2f}%")
-                            send_notification(f"🔻 卖出成交: {symbol}", f"*收益率*: {pnl:.2f}%")
+                            send_notification(f"🔻 卖出成交: {symbol}", f"*收益率*: {pnl_pct:.2f}%")
 
                 time.sleep(60) 
             except Exception as e:

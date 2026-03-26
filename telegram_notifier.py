@@ -1,6 +1,7 @@
 import requests
 import config
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -10,30 +11,62 @@ class TelegramNotifier:
         self.chat_id = config.TELEGRAM_CHAT_ID
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
-    def send_msg(self, text):
-        """发送纯文本消息"""
+    def send_msg(self, text, max_retries=3, backoff_base=2):
+        """发送纯文本消息，带自动重试机制"""
         payload = {
             "chat_id": self.chat_id,
             "text": text,
-            "parse_mode": "Markdown"  # 支持加粗、代码块等格式
+            "parse_mode": "Markdown"
         }
-        try:
-            response = requests.post(self.base_url, data=payload, timeout=10)
-            if response.status_code != 200:
-                logger.error(f"TG通知发送失败: HTTP {response.status_code} - {response.text}")
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.post(self.base_url, data=payload, timeout=10)
+                
+                # 成功
+                if response.status_code == 200:
+                    logger.info(f"✅ TG通知发送成功: {text[:50]}...")
+                    return True
+                
+                # 服务器端错误 (5xx) 可重试
+                if 500 <= response.status_code < 600:
+                    if attempt < max_retries:
+                        wait_time = backoff_base ** attempt
+                        logger.warning(f"TG API返回{response.status_code}，第{attempt}次重试，等待{wait_time}秒...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"TG通知发送失败，已重试{max_retries}次: HTTP {response.status_code} - {response.text}")
+                        return False
+                
+                # 客户端错误 (4xx) 不重试
+                else:
+                    logger.error(f"TG通知发送失败: HTTP {response.status_code} - {response.text}")
+                    return False
+                    
+            except requests.exceptions.Timeout:
+                if attempt < max_retries:
+                    wait_time = backoff_base ** attempt
+                    logger.warning(f"TG通知超时，第{attempt}次重试，等待{wait_time}秒...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"TG通知超时，已重试{max_retries}次")
+                    return False
+                    
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries:
+                    wait_time = backoff_base ** attempt
+                    logger.warning(f"TG通知网络异常，第{attempt}次重试，等待{wait_time}秒: {e}")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"TG通知网络异常，已重试{max_retries}次: {e}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"TG通知未知异常: {e}")
                 return False
-            else:
-                logger.info(f"✅ TG通知发送成功: {text[:50]}...")
-                return True
-        except requests.exceptions.Timeout:
-            logger.error("TG通知超时")
-            return False
-        except requests.exceptions.RequestException as e:
-            logger.error(f"TG通知网络异常: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"TG通知未知异常: {e}")
-            return False
+        
+        return False
 
 
 # 为了方便，你可以保持函数名一致，减少主程序改动
