@@ -1,8 +1,10 @@
 import os
 from dotenv import load_dotenv
 
-# 加载 .env 文件中的 API Key
-load_dotenv()
+# 加载 .env 文件（使用项目根目录路径，确保无论从何处启动都能找到）
+# 注意：config.py 位于项目根目录，通过 __file__ 获取绝对路径
+_dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+load_dotenv(dotenv_path=_dotenv_path)
 
 # --- API 认证 ---
 API_KEY = os.getenv('BINANCE_API_KEY')
@@ -21,13 +23,13 @@ BB_STD = 2                 # 布林带标准差
 # --- 币种差异化策略参数 ---
 STRATEGY_CONFIG = {
     'BTC/USDT': {
-        'adx_threshold': 22,        # 从 30 降至 22，1h 级别趋势信号更易触发
+        'adx_threshold': 20,        # 从 22 降至 20，更易触发趋势信号
         'rsi_oversold': 35,         # 从 40 降至 35，RSI 更有意义
         'rsi_overbought': 70,       # 从 75 降至 70，捕捉中期顶部
         'trade_amount': 30,
         'stop_loss_pct': 0.03,
 
-        'volume_threshold': 1.5,
+        'volume_threshold': 1.2,    # 从 1.5 降至 1.2，放宽量能要求
         'volume_ma_period': 20,
 
         'atr_period': 14,
@@ -64,13 +66,13 @@ STRATEGY_CONFIG = {
         }
     },
     'ETH/USDT': {
-        'adx_threshold': 22,        # 从 30 降至 22
+        'adx_threshold': 20,        # 从 22 降至 20
         'rsi_oversold': 35,          # 从 40 降至 35
         'rsi_overbought': 70,        # 从 75 降至 70
         'trade_amount': 20,
         'stop_loss_pct': 0.05,
 
-        'volume_threshold': 1.5,
+        'volume_threshold': 1.2,    # 从 1.5 降至 1.2
         'volume_ma_period': 20,
 
         'atr_period': 14,
@@ -106,13 +108,13 @@ STRATEGY_CONFIG = {
         }
     },
     'SOL/USDT': {
-        'adx_threshold': 25,        # 从 30 降至 25（注释曾写 35，已纠正）
+        'adx_threshold': 22,        # 从 25 降至 22
         'rsi_oversold': 30,         # 从 25 升至 30，更实际
         'rsi_overbought': 75,        # 从 80 降至 75
         'trade_amount': 10,
         'stop_loss_pct': 0.05,
 
-        'volume_threshold': 2.0,
+        'volume_threshold': 1.5,    # 从 2.0 降至 1.5（SOL波动较大，保持稍高要求）
         'volume_ma_period': 20,
 
         'atr_period': 14,

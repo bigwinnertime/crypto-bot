@@ -152,7 +152,7 @@ class AdvancedTradingBot:
 
         # ── 3. 卖出信号（持仓时优先判断）───────────────
         sell_reason = self._should_sell(
-            symbol, price, adx_val, rsi_val, macd_line, macd_sig,
+            symbol, price, adx_val, rsi_val, macd_line, macd_sig, macd_prev,
             bb_lower, atr, spec, adjusted
         )
         if sell_reason:
@@ -210,7 +210,7 @@ class AdvancedTradingBot:
         
         return adjusted
 
-    def _should_sell(self, symbol, price, adx, rsi, macd, macd_sig,
+    def _should_sell(self, symbol, price, adx, rsi, macd, macd_sig, macd_prev,
                      bb_lower, atr, spec, adjusted):
         """
         卖出判断（ATR 移动止损为核心，替代 SMA60 硬性跌破）：
@@ -263,13 +263,13 @@ class AdvancedTradingBot:
             if macd_golden and vol_ratio >= vol_thr:
                 return "TREND_MACD_GOLDEN_CROSS"
             if (adx > adjusted['adx_threshold'] and
-                    vol_ratio >= vol_thr * 1.2 and
+                    vol_ratio >= vol_thr * 1.0 and    # 从 1.2 降至 1.0，放宽量能要求
                     price > sma20 and rsi > 50):
                 return "TREND_ADX_VOL_CONFIRM"
 
         # ── B. RSI 均线交叉反弹（RSI 上穿 50）
         rsi_cross_50 = (rsi_prev < 50 <= rsi)
-        if rsi_cross_50 and price > bb_mid and vol_ratio >= vol_thr * 0.8:
+        if rsi_cross_50 and price > bb_mid and vol_ratio >= vol_thr * 0.7:  # 从 0.8 降至 0.7
             return "RSI_50_CROSS_BOUNCE"
 
         # ── C. 布林下轨支撑 + RSI 底背离
@@ -277,7 +277,7 @@ class AdvancedTradingBot:
         rsi_divergence = (rsi_2_ago is not None
                           and rsi > rsi_2_ago
                           and rsi > 30)
-        if touch_lower and rsi_divergence and vol_ratio >= vol_thr * 0.6:
+        if touch_lower and rsi_divergence and vol_ratio >= vol_thr * 0.5:  # 从 0.6 降至 0.5
             return "BB_LOWER_RSI_DIVERGENCE"
 
         # ── D. SMA20 突破（放宽版，不过度依赖均线排列）
@@ -380,7 +380,7 @@ class AdvancedTradingBot:
                             logger.warning(f"🚨 {symbol} 触发 {stop_reason}")
                             pnl = (price / pos['entry_price'] - 1) * 100
                             # self.notifier.send_email(f"🆘 离场通知: {symbol}", f"原因: {stop_reason}\n收益率: {pnl:.2f}%")
-                            send_notification(f"🆘  离场通知: {symbol}", f"*原因*: {stop_reason}\n*收益率*: {pnl:.2f}%")
+                            send_notification(f"🆘  离场通知: {symbol}", f"<b>原因</b>: {stop_reason}\n<b>收益率</b>: {pnl:.2f}%")
                             # 执行卖出后状态更新（记录交易历史、删除持仓），内部会保存状态
                             self.risk.execute_sell_update(symbol, price, stop_reason)
                         continue
@@ -405,7 +405,7 @@ class AdvancedTradingBot:
                             # 发送通知
                             safe_mode = mode.replace("_", " ")
                             logger.info(f"📤 正在调用 send_notification: 标题='✅  买入成交: {symbol}'")
-                            result = send_notification(f"✅  买入成交: {symbol}", f"*价格*: {price}\n*模式*: {safe_mode}")
+                            result = send_notification(f"✅  买入成交: {symbol}", f"<b>价格</b>: {price}\n<b>模式</b>: {safe_mode}")
                             logger.info(f"📤 send_notification 调用完成，返回值: {result}")
 
                     # 执行策略卖出（RSI超买等信号）
@@ -415,7 +415,7 @@ class AdvancedTradingBot:
 
                             # 发送通知
                             #self.notifier.send_email(f"🔻 卖出成交: {symbol}", f"收益率: {pnl:.2f}%")
-                            send_notification(f"🔻 卖出成交: {symbol}", f"*收益率*: {pnl_pct:.2f}%")
+                            send_notification(f"🔻 卖出成交: {symbol}", f"<b>收益率</b>: {pnl_pct:.2f}%")
 
                 time.sleep(60) 
             except Exception as e:

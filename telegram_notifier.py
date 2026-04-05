@@ -16,7 +16,7 @@ class TelegramNotifier:
         payload = {
             "chat_id": self.chat_id,
             "text": text,
-            "parse_mode": "Markdown"
+            "parse_mode": "HTML"
         }
         
         for attempt in range(1, max_retries + 1):
@@ -82,8 +82,8 @@ def send_notification(title, content, **kwargs):
         logger.error(f"❌ Telegram配置缺失: TOKEN={'有' if notifier.token else '无'}, CHAT_ID={'有' if notifier.chat_id else '无'}")
         return False
     
-    # 将标题和内容组合，使用 Markdown 格式美化
-    formatted_msg = f"🔔 *{title}*\n\n{content}"
+    # 将标题和内容组合，使用 HTML 格式美化（Markdown 对 Emoji 兼容性差）
+    formatted_msg = f"🔔 <b>{title}</b>\n\n{content}"
     
     # 添加调试信息
     logger.info(f"📤 准备发送TG通知: {title}")
