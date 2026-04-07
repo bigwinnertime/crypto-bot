@@ -7,8 +7,8 @@ import threading
 logger = logging.getLogger("TradingBot.Risk")
 
 class RiskManager:
-    # 创建一个类级别的锁（单例模式），确保所有实例共享同一把锁
-    _file_lock = threading.Lock()
+    # 创建一个类级别的可重入锁（单例模式），确保所有实例共享同一把锁
+    _file_lock = threading.RLock()
 
     def __init__(self, state_file="bot_state.json", max_exposure=0.7, fuse_limit=0.05):
         self.state_file = state_file
