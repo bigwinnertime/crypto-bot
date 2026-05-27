@@ -7,13 +7,15 @@ import time
 import logging
 import threading
 from dotenv import load_dotenv
-from risk_manager import RiskManager
-from state_manager import state_mgr
 
 logger = logging.getLogger("TradingBot.Remote")
-risk = RiskManager()
 
 load_dotenv()
+
+# 由 bot_engine 通过 init_remote_control() 注入，避免创建独立实例
+risk = None
+exchange = None
+ADMIN_ID = None
 
 # 单例模式：确保只有一个 bot 实例
 _bot_instance = None
@@ -27,24 +29,23 @@ def get_bot_instance():
                 _bot_instance = telebot.TeleBot(os.getenv('TELEGRAM_TOKEN'))
     return _bot_instance
 
-# 初始化 Bot
 bot = get_bot_instance()
-ADMIN_ID = int(os.getenv('TELEGRAM_CHAT_ID'))
 
-# 提取私钥并处理换行符
-raw_key = os.getenv('BINANCE_SECRET_KEY', '')
+def init_remote_control(risk_manager):
+    """由 bot_engine 调用，注入共享的 RiskManager 和交易所实例"""
+    global risk, exchange, ADMIN_ID
+    risk = risk_manager
+    ADMIN_ID = int(os.getenv('TELEGRAM_CHAT_ID'))
 
-# 关键点：将字符串中的 "\n" 替换为真正的换行字符，并去掉可能误加的引号
-formatted_key = raw_key.replace('\\n', '\n').strip('"').strip("'")
+    raw_key = os.getenv('BINANCE_SECRET_KEY', '')
+    formatted_key = raw_key.replace('\\n', '\n').strip('"').strip("'")
 
-
-# 初始化交易所 (以币安为例，可根据需要更换)
-exchange = ccxt.binance({
-    'apiKey': os.getenv('BINANCE_API_KEY'),
-    'secret': formatted_key,
-    'enableRateLimit': True,
-    'options': {'defaultType': 'spot', 'secretType': 'ed25519'}
-})
+    exchange = ccxt.binance({
+        'apiKey': os.getenv('BINANCE_API_KEY'),
+        'secret': formatted_key,
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot', 'secretType': 'ed25519'}
+    })
 
 def auth(message):
     return message.from_user.id == ADMIN_ID
@@ -64,7 +65,7 @@ def show_help(message):
 
 ⚙️ **参数设置**
 /config - 查看当前配置参数
-/config [参数名] [新值] - 修改全局配置（如: /config LIVE_TRADE True）
+/config [参数名] [新值] - 修改全局配置
 /set_sl [币种] [数值] - 设置止损比例（如: /set_sl BTC/USDT 0.03）
 /set_ts [币种] [数值] - 设置追踪止盈比例（如: /set_ts BTC/USDT 0.02）
 
@@ -75,6 +76,7 @@ def show_help(message):
 💡 **提示**
 • 所有数值比例使用小数表示（如 0.03 = 3%）
 • 币种格式: BTC/USDT, ETH/USDT
+• 开启实盘需两步: 先 `/config LIVE_TRADE True`，再 `/config LIVE_TRADE CONFIRM`
 • 只有管理员可使用这些命令"""
     
     bot.reply_to(message, help_text, parse_mode='Markdown')
@@ -126,9 +128,15 @@ def get_status(message):
 
         # C. 系统状态
         is_fused = risk.state.get('is_fused', False)
-        fuse_status = "🚨 已熔断" if is_fused else "✅ 正常"
+        fused_symbols = risk.state.get('fused_symbols', {})
+        if is_fused:
+            fuse_status = "🚨 全局熔断"
+        elif fused_symbols:
+            fuse_status = f"⚠️ 部分熔断: {', '.join(fused_symbols.keys())}"
+        else:
+            fuse_status = "✅ 正常"
         positions_count = len(risk.state.get('positions', {}))
-        
+
         report = (
             f"🤖 **交易机器人实时状态**\n"
             f"{'─' * 25}\n"
@@ -169,23 +177,14 @@ def update_stop_loss(message):
         symbol = symbol.upper()
         sl_val = float(value)
 
-        def update_logic(state):
-            if 'runtime_config' not in state:
-                state['runtime_config'] = {}
-            if symbol not in state['runtime_config']:
-                state['runtime_config'][symbol] = {}
-            state['runtime_config'][symbol]['stop_loss_pct'] = sl_val
-            return state
-
-        if state_mgr.update_state(func=update_logic):
-            bot.reply_to(message, 
-                f"✅ **止损设置成功**\n\n"
-                f"🔸 币种: `{symbol}`\n"
-                f"📉 止损比例: `{sl_val*100:.2f}%`\n"
-                f"💾 设置已持久化", 
-                parse_mode='Markdown')
-        else:
-            bot.reply_to(message, "❌ **设置失败**\n状态更新时发生错误", parse_mode='Markdown')
+        risk.update_runtime_config(symbol, 'stop_loss_pct', sl_val)
+        
+        bot.reply_to(message, 
+            f"✅ **止损设置成功**\n\n"
+            f"🔸 币种: `{symbol}`\n"
+            f"📉 止损比例: `{sl_val*100:.2f}%`\n"
+            f"💾 设置已持久化", 
+            parse_mode='Markdown')
             
     except ValueError:
         bot.reply_to(message, 
@@ -576,49 +575,50 @@ def manage_config(message):
             
             # 处理布尔值
             if param_name in bool_params:
+                # 特殊处理 LIVE_TRADE 的 CONFIRM 流程（必须在布尔解析前处理）
+                if param_name == 'LIVE_TRADE' and param_value.upper() == 'CONFIRM':
+                    if config.LIVE_TRADE:
+                        bot.reply_to(message,
+                            "ℹ️ **已经是实盘模式**\n\n"
+                            "无需重复确认。如需切回模拟，发送 `/config LIVE_TRADE False`",
+                            parse_mode='Markdown')
+                    else:
+                        config.LIVE_TRADE = True
+                        bot.reply_to(message,
+                            "✅ **已确认切换到实盘交易模式！**\n\n"
+                            "⚠️ 请谨慎操作，建议先小额测试\n"
+                            "📈 实盘交易已激活",
+                            parse_mode='Markdown')
+                    return
+
                 if param_value.lower() in ['true', '1', 'yes', 'on']:
                     new_value = True
                 elif param_value.lower() in ['false', '0', 'no', 'off']:
                     new_value = False
                 else:
-                    bot.reply_to(message, 
+                    bot.reply_to(message,
                         "⚠️ **格式错误**\n"
                         "布尔值参数请使用:\n"
-                        "`True` / `False` / `yes` / `no` / `on` / `off` / `1` / `0`", 
+                        "`True` / `False` / `yes` / `no` / `on` / `off` / `1` / `0`\n\n"
+                        "💡 LIVE_TRADE 开启实盘请先发送 `/config LIVE_TRADE True`，再发送 `/config LIVE_TRADE CONFIRM`",
                         parse_mode='Markdown')
                     return
-                
-                # 特殊处理LIVE_TRADE（需要更谨慎）
-                if param_name == 'LIVE_TRADE':
-                    if new_value and not config.LIVE_TRADE:
-                        bot.reply_to(message, 
-                            "🚨 **警告：即将切换到实盘模式！**\n\n"
-                            "⚠️ 请确认：\n"
-                            "• API密钥已正确配置\n"
-                            "• 了解实盘交易风险\n\n"
-                            "发送 `/config LIVE_TRADE CONFIRM` 确认切换。", 
-                            parse_mode='Markdown')
-                        return
-                    elif not new_value and config.LIVE_TRADE:
-                        config.LIVE_TRADE = False
-                        bot.reply_to(message, 
-                            "✅ **已切换回模拟交易模式**\n\n"
-                            "📊 系统将使用虚拟资金进行测试", 
-                            parse_mode='Markdown')
-                        return
-                    elif new_value and param_value.upper() == 'CONFIRM':
-                        config.LIVE_TRADE = True
-                        bot.reply_to(message, 
-                            "✅ **已确认切换到实盘交易模式！**\n\n"
-                            "⚠️ 请谨慎操作，建议先小额测试\n"
-                            "📈 实盘交易已激活", 
-                            parse_mode='Markdown')
-                        return
-                
+
+                # LIVE_TRADE 开启实盘需要二次确认
+                if param_name == 'LIVE_TRADE' and new_value and not config.LIVE_TRADE:
+                    bot.reply_to(message,
+                        "🚨 **警告：即将切换到实盘模式！**\n\n"
+                        "⚠️ 请确认：\n"
+                        "• API密钥已正确配置\n"
+                        "• 了解实盘交易风险\n\n"
+                        "发送 `/config LIVE_TRADE CONFIRM` 确认切换。",
+                        parse_mode='Markdown')
+                    return
+
                 setattr(config, param_name, new_value)
-                bot.reply_to(message, 
+                bot.reply_to(message,
                     f"✅ **配置已更新**\n\n"
-                    f"`{param_name} = {new_value}`", 
+                    f"`{param_name} = {new_value}`",
                     parse_mode='Markdown')
                 return
             
@@ -680,37 +680,49 @@ def manage_config(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ **配置操作失败**\n```\n{str(e)[:200]}\n```", parse_mode='Markdown')
 
+def _is_lock_stale(lock_file):
+    """检测锁文件是否属于已退出的进程（PID 不存在则视为过期）"""
+    try:
+        with open(lock_file, 'r') as f:
+            old_pid = int(f.read().strip())
+        os.kill(old_pid, 0)  # 不发送信号，仅检查进程是否存在
+        return False  # 进程仍在运行
+    except (OSError, ValueError):
+        return True  # 进程不存在或 PID 无效
+
 # 启动监听
 def start_remote_listener():
-    # 进程锁：防止多个实例同时运行
+    if risk is None or exchange is None:
+        logger.error("❌ 远程控制未初始化，请先调用 init_remote_control()")
+        return
+
     lock_file = "telegram_bot.lock"
-    
+
     try:
-        # 检查锁文件
+        # 检查锁文件，支持检测过期锁
         if os.path.exists(lock_file):
-            logger.warning("⚠️ 检测到其他 bot 实例正在运行，跳过启动")
-            return
-        
-        # 创建锁文件
+            if _is_lock_stale(lock_file):
+                logger.warning("⚠️ 发现过期锁文件（进程已退出），清理后继续")
+                os.remove(lock_file)
+            else:
+                logger.warning("⚠️ 检测到其他 bot 实例正在运行，跳过启动")
+                return
+
+        # 创建锁文件（写入当前 PID）
         with open(lock_file, 'w') as f:
             f.write(str(os.getpid()))
-        
+
         logger.info("📡 远程调参监听器已启动...")
-        
-        # 使用 webhook 模式避免轮询冲突
-        try:
-            # 先停止任何现有的轮询
-            bot.stop_polling()
-            # 使用非阻塞轮询模式
-            bot.polling(none_stop=True, interval=3, timeout=60)
-        except Exception as e:
-            logger.error(f"Telegram bot polling error: {e}")
-            # 如果出错，等待后重试
-            time.sleep(5)
-            start_remote_listener()
-            
+
+        # 先停止任何现有的轮询
+        bot.stop_polling()
+        # 使用非阻塞轮询模式
+        bot.polling(none_stop=True, interval=3, timeout=60)
+
     except KeyboardInterrupt:
         logger.info("👋 Bot 监听器已停止")
+    except Exception as e:
+        logger.error(f"Telegram bot polling error: {e}")
     finally:
         # 清理锁文件
         if os.path.exists(lock_file):

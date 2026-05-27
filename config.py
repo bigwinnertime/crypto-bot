@@ -54,14 +54,18 @@ STRATEGY_CONFIG = {
             {'profit_threshold': 0.10, 'trigger_drawdown': 0.03,  'trailing_pct': 0.025},
         ],
 
+        'risk_per_trade': 0.01,       # 每笔交易风险占账户 1%
+        'max_trade_amount': 100,      # 最大单笔金额上限
+        'profit_target_atr': 3.0,     # 主动止盈：盈利达 3×ATR 时锁定利润
+
         'time_decay': {
             'enabled': True,
             'intervals': [
                 {'hours': 1,  'multiplier': 1.0},
-                {'hours': 4,  'multiplier': 0.8},
-                {'hours': 12, 'multiplier': 0.6},
+                {'hours': 4,  'multiplier': 0.9},
+                {'hours': 12, 'multiplier': 0.7},
                 {'hours': 24, 'multiplier': 0.5},
-                {'hours': float('inf'), 'multiplier': 0.4}
+                {'hours': float('inf'), 'multiplier': 0.3}
             ]
         }
     },
@@ -96,14 +100,18 @@ STRATEGY_CONFIG = {
             {'profit_threshold': 0.12, 'trigger_drawdown': 0.03,  'trailing_pct': 0.03},
         ],
 
+        'risk_per_trade': 0.01,
+        'max_trade_amount': 80,
+        'profit_target_atr': 3.0,
+
         'time_decay': {
             'enabled': True,
             'intervals': [
                 {'hours': 1,  'multiplier': 1.0},
-                {'hours': 4,  'multiplier': 0.8},
-                {'hours': 12, 'multiplier': 0.6},
+                {'hours': 4,  'multiplier': 0.9},
+                {'hours': 12, 'multiplier': 0.7},
                 {'hours': 24, 'multiplier': 0.5},
-                {'hours': float('inf'), 'multiplier': 0.4}
+                {'hours': float('inf'), 'multiplier': 0.3}
             ]
         }
     },
@@ -138,14 +146,18 @@ STRATEGY_CONFIG = {
             {'profit_threshold': 0.15, 'trigger_drawdown': 0.035, 'trailing_pct': 0.035},
         ],
 
+        'risk_per_trade': 0.01,
+        'max_trade_amount': 50,
+        'profit_target_atr': 3.5,     # SOL 波动大，止盈目标稍宽
+
         'time_decay': {
             'enabled': True,
             'intervals': [
                 {'hours': 1,  'multiplier': 1.0},
-                {'hours': 4,  'multiplier': 0.8},
-                {'hours': 12, 'multiplier': 0.6},
+                {'hours': 4,  'multiplier': 0.9},
+                {'hours': 12, 'multiplier': 0.7},
                 {'hours': 24, 'multiplier': 0.5},
-                {'hours': float('inf'), 'multiplier': 0.4}
+                {'hours': float('inf'), 'multiplier': 0.3}
             ]
         }
     }
@@ -200,24 +212,42 @@ DEFAULT_CONFIG = {
             'trailing_pct': 0.025
         },
     ],
-    
-    # 默认时间衰减配置
+
+    # 波动率自适应仓位
+    'risk_per_trade': 0.01,
+    'max_trade_amount': 100,
+    'profit_target_atr': 3.0,
+
+    # 默认时间衰减配置（持仓越久，止损越紧）
     'time_decay': {
         'enabled': True,
         'intervals': [
             {'hours': 1, 'multiplier': 1.0},
-            {'hours': 4, 'multiplier': 0.8},
-            {'hours': 12, 'multiplier': 0.6},
+            {'hours': 4, 'multiplier': 0.9},
+            {'hours': 12, 'multiplier': 0.7},
             {'hours': 24, 'multiplier': 0.5},
-            {'hours': float('inf'), 'multiplier': 0.4}
+            {'hours': float('inf'), 'multiplier': 0.3}
         ]
     }
 }
 
 # --- 风险控制参数 ---
 MAX_TOTAL_EXPOSURE = 0.7   # 总仓位价值占账户总资产的最大比例 (70%)
-DRAWDOWN_FUSE = 0.05       # 熔断阈值：单周期价格跌幅超 5% 停止交易
-FUSE_DURATION = 14400      # 熔断锁定时间：4 小时 (单位：秒)
+DRAWDOWN_FUSE = 0.08       # 熔断阈值：单周期价格跌幅超 8% 触发熔断
+FUSE_DURATION = 7200       # 熔断锁定时间：2 小时 (单位：秒)
+
+# 账户级最大回撤保护
+MAX_DRAWDOWN_PCT = 0.15    # 账户净值从最高点回撤 15% 暂停所有交易
+DRAWDOWN_COOLDOWN = 14400  # 回撤冷却时间：4 小时 (单位：秒)
+
+# 相关性分组（同组币种限制同时持仓数量）
+CORRELATION_GROUPS = {
+    'L1': ['BTC/USDT', 'ETH/USDT'],    # 高相关性 Layer1
+}
+MAX_CORRELATED_POSITIONS = 1  # 同组最多持仓数
+
+# 多时间框架配置
+HIGHER_TIMEFRAME = '4h'    # 高级时间框架用于趋势过滤
 
 # 是否开启实盘下单：True 为真实下单，False 为模拟运行
 LIVE_TRADE = False
