@@ -243,11 +243,15 @@ class RiskManager:
     # ═══════════════════════════════════════════════════
 
     def update_trailing_stop(self, symbol, current_price, df=None):
-        """分阶段追踪止盈 + 时间衰减。止损逻辑由 bot_engine._should_sell 统一处理。"""
+        """分阶段追踪止盈 + 时间衰减。仅趋势仓位使用，均值回归仓位退出由 bot_engine._should_sell 处理。"""
         if symbol not in self.state['positions']:
             return None
 
         pos = self.state['positions'][symbol]
+
+        # 均值回归仓位不使用追踪止盈，其退出逻辑在 _should_sell 中独立处理
+        if pos.get('strategy_type') == 'meanrev':
+            return None
 
         # --- 1. 参数获取 ---
         spec_cfg = self.get_effective_config(symbol)
@@ -414,7 +418,7 @@ class RiskManager:
             self.save_state()
             logger.info(f"⚙️ 远程配置更新: {symbol} {key} = {value}")
 
-    def execute_buy_update(self, symbol, price, amount, cost, mode):
+    def execute_buy_update(self, symbol, price, amount, cost, mode, strategy_type='trend'):
         """统一封装：买入后的状态更新逻辑"""
         with self._file_lock:
             self.state['positions'][symbol] = {
@@ -422,6 +426,7 @@ class RiskManager:
                 "amount": amount,
                 "cost": cost,
                 "highest_price": price,
+                "strategy_type": strategy_type,
                 "time": time.strftime("%Y-%m-%d %H:%M:%S")
             }
             self.save_state()

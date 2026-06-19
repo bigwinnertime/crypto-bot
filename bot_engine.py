@@ -119,14 +119,31 @@ class AdvancedTradingBot:
         return 0
 
     # ═══════════════════════════════════════════════════
-    #  信号生成
+    #  市场状态识别 & 信号生成
     # ═══════════════════════════════════════════════════
 
+    def _detect_regime(self, adx, bb_upper, bb_lower, bb_mid, price, spec):
+        """
+        市场状态识别：根据 ADX 强度 + 布林带宽度判断当前为趋势态/震荡态/中性。
+        返回: 'TREND' | 'RANGE' | 'NEUTRAL'
+        """
+        bb_width = (bb_upper - bb_lower) / price if price > 0 else 0
+        trend_adx = spec.get('regime_trend_adx', 25)
+        range_adx = spec.get('regime_range_adx', 20)
+        trend_bb = spec.get('regime_trend_bb_width', 0.03)
+        range_bb = spec.get('regime_range_bb_width', 0.02)
+
+        if adx >= trend_adx and bb_width >= trend_bb:
+            return 'TREND'
+        if adx <= range_adx and bb_width <= range_bb:
+            return 'RANGE'
+        return 'NEUTRAL'
+
     def get_strategy_signal(self, df, symbol):
-        """策略信号生成器 v4"""
+        """策略信号生成器 v5 — Regime 自适应（趋势态用趋势信号，震荡态用均值回归信号）"""
         if len(df) < 60:
             logger.warning(f"{symbol} 数据不足（{len(df)}根），跳过信号判定")
-            return "HOLD", "INSUFFICIENT_DATA"
+            return "HOLD", "INSUFFICIENT_DATA", None
 
         spec = self.risk.get_effective_config(symbol)
 
@@ -176,27 +193,30 @@ class AdvancedTradingBot:
         # 波动率自适应参数
         adjusted = self._adjust_params_by_volatility(spec, atr_pct)
 
-        # 卖出信号（持仓时优先判断）
+        # 市场状态识别
+        regime = self._detect_regime(adx_val, bb_upper, bb_lower, bb_mid, price, spec)
+
+        # 卖出信号（持仓时优先判断，根据持仓策略类型走不同退出逻辑）
         sell_reason = self._should_sell(
             symbol, price, adx_val, rsi_val, macd_line, macd_sig, macd_prev,
-            bb_lower, atr, spec, adjusted
+            bb_lower, bb_mid, bb_upper, atr, spec, adjusted
         )
         if sell_reason:
-            return "SELL", sell_reason
+            return "SELL", sell_reason, None
 
-        # 买入信号
-        buy_reason = self._should_buy(
+        # 买入信号（根据市场状态选择策略类型）
+        buy_reason, strategy_type = self._should_buy(
             price, adx_val, rsi_val, rsi_prev, rsi_3_ago, sma20, sma60,
             macd_line, macd_sig, macd_prev,
             bb_lower, bb_mid, bb_upper, vol_ratio, spec, adjusted,
-            is_green_candle, candle_body_ratio
+            is_green_candle, candle_body_ratio, regime
         )
         if buy_reason:
-            return "BUY", buy_reason
+            return "BUY", buy_reason, strategy_type
 
-        regime = "【趋势】" if adx_val > adjusted['adx_threshold'] else "【震荡】"
-        logger.debug(f"{symbol} {regime} ADX={adx_val:.1f} RSI={rsi_val:.1f} → 持币观望")
-        return "HOLD", "NONE"
+        regime_label = {"TREND": "趋势", "RANGE": "震荡", "NEUTRAL": "中性"}.get(regime, regime)
+        logger.debug(f"{symbol} 【{regime_label}】 ADX={adx_val:.1f} RSI={rsi_val:.1f} → 持币观望")
+        return "HOLD", "NONE", None
 
     def _adjust_params_by_volatility(self, spec, atr_pct):
         """根据波动率动态调整参数"""
@@ -232,14 +252,11 @@ class AdvancedTradingBot:
     # ═══════════════════════════════════════════════════
 
     def _should_sell(self, symbol, price, adx, rsi, macd, macd_sig, macd_prev,
-                     bb_lower, atr, spec, adjusted):
+                     bb_lower, bb_mid, bb_upper, atr, spec, adjusted):
         """
-        统一卖出决策树：
-          1. ATR 追踪止损
-          2. 固定止损
-          3. 主动止盈（盈利达 N×ATR）
-          4. RSI 超买（盈利 > 5% 时）+ 最小盈利保护
-          5. MACD 死叉 + ADX 趋弱（仅弱趋势/震荡中）+ 最小盈利保护
+        统一卖出决策树，根据持仓策略类型走不同退出逻辑：
+          trend   → ATR追踪止损/固定止损/主动止盈/RSI超买/MACD死叉（让利润奔跑）
+          meanrev → 紧止损/布林中轨止盈/RSI回升退出/超时退出（快进快出）
         """
         pos = self.risk.state['positions'].get(symbol)
         if not pos:
@@ -247,11 +264,40 @@ class AdvancedTradingBot:
 
         entry_price = pos['entry_price']
         highest_price = pos.get('highest_price', entry_price)
-        atr_multi = spec.get('atr_multiplier', 2.0)
+        strategy_type = pos.get('strategy_type', 'trend')
         profit_pct = (price - entry_price) / entry_price
-        profit_in_atr = (price - entry_price) / atr if atr > 0 else 0
 
-        # 最小盈利保护阈值：盈利低于此值时，不触发主动卖出（止损除外）
+        # ═══ 均值回归退出逻辑（快进快出） ═══
+        if strategy_type == 'meanrev':
+            mr_cfg = spec.get('meanrev_config', {})
+            mr_stop = mr_cfg.get('stop_loss_pct', 0.025)
+            mr_rsi_exit = mr_cfg.get('rsi_exit', 50)
+            mr_bb_mid_exit = mr_cfg.get('bb_mid_exit', True)
+            mr_max_hold = mr_cfg.get('max_hold_hours', 24)
+
+            # 1. 紧止损
+            hard_stop = entry_price * (1 - mr_stop)
+            if price <= hard_stop:
+                return f"均值回归止损 (价{price:.2f}≤线{hard_stop:.2f})"
+
+            # 2. 触及布林中轨止盈
+            if mr_bb_mid_exit and price >= bb_mid and profit_pct > 0:
+                return f"均值回归止盈 (触及布林中轨 {bb_mid:.2f})"
+
+            # 3. RSI 回升退出
+            if rsi >= mr_rsi_exit and profit_pct > 0:
+                return f"均值回归RSI退出 (RSI={rsi:.1f}≥{mr_rsi_exit})"
+
+            # 4. 超时强制退出
+            holding_hours = self.risk._get_holding_hours(pos)
+            if holding_hours >= mr_max_hold:
+                return f"均值回归超时退出 (持仓{holding_hours:.1f}h≥{mr_max_hold}h)"
+
+            return None
+
+        # ═══ 趋势跟踪退出逻辑（让利润奔跑） ═══
+        atr_multi = spec.get('atr_multiplier', 2.0)
+        profit_in_atr = (price - entry_price) / atr if atr > 0 else 0
         min_profit_pct = spec.get('min_profit_pct', 0.008)
 
         # 1. ATR 追踪止损（无条件触发，止损优先）
@@ -266,7 +312,7 @@ class AdvancedTradingBot:
         if price <= hard_stop:
             return f"固定止损 (价{price:.2f}≤线{hard_stop:.2f})"
 
-        # 3. 主动止盈：盈利达到 N×ATR 时锁定利润（无条件触发，高利润已覆盖手续费）
+        # 3. 主动止盈：盈利达到 N×ATR 时锁定利润
         profit_target = spec.get('profit_target_atr', 6.0)
         if profit_in_atr >= profit_target:
             return f"主动止盈 (盈利{profit_in_atr:.1f}×ATR ≥ {profit_target:.0f}×ATR)"
@@ -277,12 +323,11 @@ class AdvancedTradingBot:
         if profit_pct > 0.05 and profit_pct > min_profit_pct and rsi > adjusted['rsi_overbought']:
             return f"RSI超买预警 (RSI={rsi:.1f}>阈值{adjusted['rsi_overbought']:.0f})"
 
-        # 5. MACD 死叉 + ADX 趋弱（仅在弱趋势/震荡中使用，且盈利需超过最小保护阈值）
+        # 5. MACD 死叉 + ADX 回落（放宽条件，强趋势反转也能退出）
         strong_trend_threshold = adjusted['adx_threshold'] * 1.5
         macd_dead = (macd_prev > macd_sig and macd < macd_sig)
-        if macd_dead and adx < strong_trend_threshold and profit_pct > min_profit_pct:
-            if adx < adjusted['adx_threshold'] * 0.75:
-                return "MACD死叉+ADX趋弱"
+        if macd_dead and profit_pct > min_profit_pct and adx < strong_trend_threshold:
+            return f"MACD死叉+ADX回落 (ADX={adx:.1f}<{strong_trend_threshold:.1f})"
 
         return None
 
@@ -294,57 +339,55 @@ class AdvancedTradingBot:
                     sma20, sma60,
                     macd, macd_sig, macd_prev,
                     bb_lower, bb_mid, bb_upper, vol_ratio, spec, adjusted,
-                    is_green_candle=True, candle_body_ratio=0.0):
+                    is_green_candle=True, candle_body_ratio=0.0, regime='NEUTRAL'):
         """
-        四套买入逻辑（任意一套命中 + 量能确认 → 买入）：
-          A. 趋势跟随：MACD 金叉 + ADX 确认 + 量能 + MACD零轴过滤
-          B. RSI 反弹：RSI 上穿 50 + 价格站稳布林中轨 + 趋势确认 + 量能
-          C. 布林支撑：价格触下轨 + RSI 底背离 + 量能
-          D. SMA20 突破：价格站上 SMA20 + RSI 健康 + 量能 + 阳线质量
-
-        新增过滤器（减少假信号）：
-          - MACD零轴过滤：趋势信号要求MACD线在零轴附近或以上
-          - 阳线实体质量：实体占K线高度30%以上才认为有效突破
+        Regime 自适应入场：
+          TREND  → 趋势跟随信号（MACD金叉/ADX量能/RSI上穿50/SMA20突破）
+          RANGE  → 均值回归信号（布林下轨+RSI底背离）
+          NEUTRAL → 观望
+        返回: (buy_reason, strategy_type) 或 (None, None)
         """
         vol_thr = spec.get('volume_threshold', 1.5)
-
-        # ── A. 趋势跟随（MACD 金叉 + 量能放大 + MACD零轴过滤）
         macd_golden = (macd_prev < macd_sig and macd > macd_sig)
-        # MACD零轴过滤：金叉发生在零轴以上或接近零轴（-0.1%容错）时信号更可靠
         macd_above_zero = macd > -abs(macd_sig) * 0.5
-        # 阳线质量检查：实体比例 > 30% 才认为有效（过滤十字星等无效信号）
+        macd_dead = (macd_prev > macd_sig and macd < macd_sig)
         quality_candle = candle_body_ratio > 0.30
 
-        if adx > adjusted['adx_threshold'] * 0.8:
-            if macd_golden and macd_above_zero and vol_ratio >= vol_thr and is_green_candle and quality_candle:
-                return "TREND_MACD_GOLDEN_CROSS"
-            if (adx > adjusted['adx_threshold'] and
-                    vol_ratio >= vol_thr and
-                    price > sma20 and rsi > 50 and is_green_candle and quality_candle):
-                return "TREND_ADX_VOL_CONFIRM"
+        if regime == 'TREND':
+            # ── 趋势跟随信号 ──
+            if adx > adjusted['adx_threshold'] * 0.8:
+                # A1. MACD 金叉 + 量能 + 零轴过滤
+                if macd_golden and macd_above_zero and vol_ratio >= vol_thr and is_green_candle and quality_candle:
+                    return "TREND_MACD_GOLDEN_CROSS", 'trend'
+                # A2. ADX + 量能确认
+                if (adx > adjusted['adx_threshold'] and
+                        vol_ratio >= vol_thr and
+                        price > sma20 and rsi > 50 and is_green_candle and quality_candle):
+                    return "TREND_ADX_VOL_CONFIRM", 'trend'
 
-        # ── B. RSI 均线交叉反弹（RSI 上穿 50 + 趋势过滤）
-        rsi_cross_50 = (rsi_prev < 50 <= rsi)
-        # 趋势过滤: 价格在 SMA60 之上或 ADX 显示趋势
-        trend_ok = (price > sma60 or adx > adjusted['adx_threshold'])
-        if rsi_cross_50 and trend_ok and price > bb_mid and vol_ratio >= vol_thr * 0.8:
-            return "RSI_50_CROSS_BOUNCE"
+            # B. RSI 上穿50 + 趋势过滤
+            rsi_cross_50 = (rsi_prev < 50 <= rsi)
+            trend_ok = (price > sma60 or adx > adjusted['adx_threshold'])
+            if rsi_cross_50 and trend_ok and price > bb_mid and vol_ratio >= vol_thr * 0.8:
+                return "TREND_RSI_50_CROSS", 'trend'
 
-        # ── C. 布林下轨支撑 + RSI 底背离（严格版：要求连续2根K线RSI回升）
-        touch_lower = price <= bb_lower * 1.005
-        bb_width = (bb_upper - bb_lower) / price
-        bb_sufficient = bb_width > 0.02
-        rsi_bouncing = (rsi_3_ago is not None and rsi > rsi_prev > rsi_3_ago and rsi < 35)
-        if touch_lower and bb_sufficient and rsi_bouncing and vol_ratio >= vol_thr * 0.8:
-            return "BB_LOWER_RSI_DIVERGENCE"
+            # D. SMA20 突破 + 阳线质量
+            if (price > sma20 and rsi > 55 and
+                    vol_ratio >= vol_thr and not macd_dead and is_green_candle and quality_candle):
+                return "TREND_SMA20_BREAKOUT", 'trend'
 
-        # ── D. SMA20 突破（增加阳线质量过滤）
-        macd_dead = (macd_prev > macd_sig and macd < macd_sig)
-        if (price > sma20 and rsi > 55 and
-                vol_ratio >= vol_thr and not macd_dead and is_green_candle and quality_candle):
-            return "SMA20_BREAKOUT"
+        elif regime == 'RANGE':
+            # ── 均值回归信号 ──
+            # C. 布林下轨支撑 + RSI 底背离
+            touch_lower = price <= bb_lower * 1.005
+            bb_width = (bb_upper - bb_lower) / price
+            bb_sufficient = bb_width > 0.02
+            rsi_bouncing = (rsi_3_ago is not None and rsi > rsi_prev > rsi_3_ago and rsi < 35)
+            if touch_lower and bb_sufficient and rsi_bouncing and vol_ratio >= vol_thr * 0.8:
+                return "MEANREV_BB_LOWER_RSI_DIVERGENCE", 'meanrev'
 
-        return None
+        # NEUTRAL: 观望
+        return None, None
 
     # ═══════════════════════════════════════════════════
     #  波动率自适应仓位计算
@@ -463,20 +506,22 @@ class AdvancedTradingBot:
                             continue
 
                     # --- 第二步：策略信号判定 ---
-                    signal, mode = self.get_strategy_signal(df, symbol)
+                    signal, mode, strategy_type = self.get_strategy_signal(df, symbol)
 
                     # --- 第三步：信号确认（连续2轮相同信号才入场，过滤假突破）---
                     confirmed_mode = None
+                    confirmed_strategy_type = None
                     if signal == "BUY" and not is_fused:
                         prev = self.pending_signals.get(symbol, {})
                         if prev.get('signal') == 'BUY' and prev.get('mode') == mode:
                             # 连续第2轮触发相同买入信号，确认入场
                             confirmed_mode = mode
-                            logger.info(f"✅ {symbol} 信号二次确认: {mode}")
+                            confirmed_strategy_type = strategy_type
+                            logger.info(f"✅ {symbol} 信号二次确认: {mode} (策略: {strategy_type})")
                             self.pending_signals.pop(symbol, None)
                         else:
                             # 第1轮，记录信号，等待下一轮确认
-                            self.pending_signals[symbol] = {'signal': 'BUY', 'mode': mode}
+                            self.pending_signals[symbol] = {'signal': 'BUY', 'mode': mode, 'strategy_type': strategy_type}
                             logger.info(f"⏳ {symbol} 等待信号二次确认: {mode} (第1/2轮)")
                     else:
                         # 非BUY信号或熔断状态，清除待确认状态
@@ -501,10 +546,11 @@ class AdvancedTradingBot:
                             symbol, 'buy', amount, price, confirmed_mode)
                         if success:
                             actual_cost = fill_amount * fill_price if config.LIVE_TRADE else trade_amount
-                            self.risk.execute_buy_update(symbol, fill_price, fill_amount, actual_cost, confirmed_mode)
+                            self.risk.execute_buy_update(symbol, fill_price, fill_amount, actual_cost, confirmed_mode, confirmed_strategy_type)
                             safe_mode = confirmed_mode.replace("_", " ")
+                            strategy_label = "趋势跟踪" if confirmed_strategy_type == 'trend' else "均值回归"
                             send_notification(f"✅ 买入成交: {symbol}",
-                                              f"<b>价格</b>: {fill_price}\n<b>金额</b>: {actual_cost:.2f} USDT\n<b>模式</b>: {safe_mode}\n<b>4h趋势</b>: {htf_label}")
+                                              f"<b>价格</b>: {fill_price}\n<b>金额</b>: {actual_cost:.2f} USDT\n<b>模式</b>: {safe_mode}\n<b>策略</b>: {strategy_label}\n<b>4h趋势</b>: {htf_label}")
                             # 买入后刷新可用余额，避免后续币种基于过期余额过度下单
                             if not config.LIVE_TRADE:
                                 total_usdt = self.risk.state['virtual_account']['balance']

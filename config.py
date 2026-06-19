@@ -70,7 +70,21 @@ STRATEGY_CONFIG = {
                 {'hours': 72,  'multiplier': 0.75},
                 {'hours': float('inf'), 'multiplier': 0.6}
             ]
-        }
+        },
+
+        # Regime 市场状态识别参数
+        'regime_trend_adx': 25,          # ADX≥此值 + 布林带扩张 → 趋势态
+        'regime_range_adx': 20,          # ADX≤此值 + 布林带收口 → 震荡态
+        'regime_trend_bb_width': 0.03,   # 趋势态最小布林带宽度
+        'regime_range_bb_width': 0.02,   # 震荡态最大布林带宽度
+
+        # 均值回归策略退出参数（仅震荡态入场仓位使用）
+        'meanrev_config': {
+            'stop_loss_pct': 0.025,       # 均值回归止损更紧（2.5%）
+            'rsi_exit': 50,               # RSI回升至此值止盈
+            'bb_mid_exit': True,          # 价格触及布林中轨止盈
+            'max_hold_hours': 24,         # 最长持仓时间，超时强制退出
+        },
     },
     'ETH/USDT': {
         'adx_threshold': 22,
@@ -118,7 +132,21 @@ STRATEGY_CONFIG = {
                 {'hours': 72,  'multiplier': 0.75},
                 {'hours': float('inf'), 'multiplier': 0.6}
             ]
-        }
+        },
+
+        # Regime 市场状态识别参数
+        'regime_trend_adx': 25,
+        'regime_range_adx': 20,
+        'regime_trend_bb_width': 0.03,
+        'regime_range_bb_width': 0.02,
+
+        # 均值回归策略退出参数（仅震荡态入场仓位使用）
+        'meanrev_config': {
+            'stop_loss_pct': 0.025,
+            'rsi_exit': 50,
+            'bb_mid_exit': True,
+            'max_hold_hours': 24,
+        },
     },
     'SOL/USDT': {
         'adx_threshold': 25,        # SOL波动大，要求更强趋势
@@ -166,7 +194,21 @@ STRATEGY_CONFIG = {
                 {'hours': 72,  'multiplier': 0.75},
                 {'hours': float('inf'), 'multiplier': 0.6}
             ]
-        }
+        },
+
+        # Regime 市场状态识别参数（SOL波动大，阈值更宽）
+        'regime_trend_adx': 28,
+        'regime_range_adx': 22,
+        'regime_trend_bb_width': 0.04,
+        'regime_range_bb_width': 0.025,
+
+        # 均值回归策略退出参数（SOL止损稍宽）
+        'meanrev_config': {
+            'stop_loss_pct': 0.035,
+            'rsi_exit': 50,
+            'bb_mid_exit': True,
+            'max_hold_hours': 24,
+        },
     }
 }
 
@@ -236,7 +278,21 @@ DEFAULT_CONFIG = {
             {'hours': 72, 'multiplier': 0.75},
             {'hours': float('inf'), 'multiplier': 0.6}
         ]
-    }
+    },
+
+    # Regime 市场状态识别参数
+    'regime_trend_adx': 25,
+    'regime_range_adx': 20,
+    'regime_trend_bb_width': 0.03,
+    'regime_range_bb_width': 0.02,
+
+    # 均值回归策略退出参数
+    'meanrev_config': {
+        'stop_loss_pct': 0.025,
+        'rsi_exit': 50,
+        'bb_mid_exit': True,
+        'max_hold_hours': 24,
+    },
 }
 
 # --- 风险控制参数 ---
