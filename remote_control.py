@@ -35,7 +35,17 @@ def init_remote_control(risk_manager):
     """由 bot_engine 调用，注入共享的 RiskManager 和交易所实例"""
     global risk, exchange, ADMIN_ID
     risk = risk_manager
-    ADMIN_ID = int(os.getenv('TELEGRAM_CHAT_ID'))
+
+    chat_id_str = os.getenv('TELEGRAM_CHAT_ID')
+    if not chat_id_str:
+        logger.error("❌ TELEGRAM_CHAT_ID 未配置，远程控制鉴权将拒绝所有请求。请在 .env 中设置。")
+        ADMIN_ID = None
+    else:
+        try:
+            ADMIN_ID = int(chat_id_str)
+        except (ValueError, TypeError) as e:
+            logger.error(f"❌ TELEGRAM_CHAT_ID 格式无效 ({chat_id_str})，远程控制鉴权将拒绝所有请求: {e}")
+            ADMIN_ID = None
 
     raw_key = os.getenv('BINANCE_SECRET_KEY', '')
     formatted_key = raw_key.replace('\\n', '\n').strip('"').strip("'")

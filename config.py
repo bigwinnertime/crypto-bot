@@ -12,7 +12,7 @@ SECRET_KEY = os.getenv('BINANCE_SECRET_KEY')
 
 # --- 交易市场配置 ---
 SYMBOLS = ['BTC/USDT','ETH/USDT','SOL/USDT']
-TIMEFRAME = '1h'           # K线周期
+TIMEFRAME = '4h'           # K线周期（4h：每根K线波动更大，手续费占比更低）
 #TRADE_AMOUNT_USDT = 20     # 每次下单的固定金额（USDT）
 
 # --- 策略核心参数 ---
@@ -23,13 +23,13 @@ BB_STD = 2                 # 布林带标准差
 # --- 币种差异化策略参数 ---
 STRATEGY_CONFIG = {
     'BTC/USDT': {
-        'adx_threshold': 20,        # 从 22 降至 20，更易触发趋势信号
-        'rsi_oversold': 35,         # 从 40 降至 35，RSI 更有意义
-        'rsi_overbought': 70,       # 从 75 降至 70，捕捉中期顶部
+        'adx_threshold': 22,        # 4h框架下ADX需更强趋势才入场
+        'rsi_oversold': 35,
+        'rsi_overbought': 70,
         'trade_amount': 30,
-        'stop_loss_pct': 0.03,
+        'stop_loss_pct': 0.04,      # 4h框架止损稍宽，减少噪音触发
 
-        'volume_threshold': 1.2,    # 从 1.5 降至 1.2，放宽量能要求
+        'volume_threshold': 1.5,    # 收紧量能要求，减少低质量信号
         'volume_ma_period': 20,
 
         'atr_period': 14,
@@ -48,35 +48,38 @@ STRATEGY_CONFIG = {
             'high_vol_multiplier': 1.2,
         },
 
+        # 追踪止盈：门槛从2%提升至5%，给利润更大运行空间
         'trailing_stops': [
-            {'profit_threshold': 0.02, 'trigger_drawdown': 0.02,  'trailing_pct': 0.015},
             {'profit_threshold': 0.05, 'trigger_drawdown': 0.025, 'trailing_pct': 0.02},
             {'profit_threshold': 0.10, 'trigger_drawdown': 0.03,  'trailing_pct': 0.025},
+            {'profit_threshold': 0.18, 'trigger_drawdown': 0.04,  'trailing_pct': 0.035},
         ],
 
         'risk_per_trade': 0.01,       # 每笔交易风险占账户 1%
         'max_trade_amount': 100,      # 最大单笔金额上限
-        'profit_target_atr': 3.0,     # 主动止盈：盈利达 3×ATR 时锁定利润
+        'profit_target_atr': 6.0,     # 主动止盈：4h框架ATR更大，目标提升至6×ATR（约3-5%）
+        'min_profit_pct': 0.008,      # 最小盈利保护：盈利低于0.8%时不主动卖出
 
+        # 时间衰减：4h框架下延长观察期，48h后才开始收紧
         'time_decay': {
             'enabled': True,
             'intervals': [
-                {'hours': 1,  'multiplier': 1.0},
-                {'hours': 4,  'multiplier': 0.9},
-                {'hours': 12, 'multiplier': 0.7},
-                {'hours': 24, 'multiplier': 0.5},
-                {'hours': float('inf'), 'multiplier': 0.3}
+                {'hours': 12,  'multiplier': 1.0},
+                {'hours': 24,  'multiplier': 1.0},
+                {'hours': 48,  'multiplier': 0.9},
+                {'hours': 72,  'multiplier': 0.75},
+                {'hours': float('inf'), 'multiplier': 0.6}
             ]
         }
     },
     'ETH/USDT': {
-        'adx_threshold': 20,        # 从 22 降至 20
-        'rsi_oversold': 35,          # 从 40 降至 35
-        'rsi_overbought': 70,        # 从 75 降至 70
+        'adx_threshold': 22,
+        'rsi_oversold': 35,
+        'rsi_overbought': 70,
         'trade_amount': 20,
         'stop_loss_pct': 0.05,
 
-        'volume_threshold': 1.2,    # 从 1.5 降至 1.2
+        'volume_threshold': 1.5,    # 收紧量能要求
         'volume_ma_period': 20,
 
         'atr_period': 14,
@@ -94,35 +97,37 @@ STRATEGY_CONFIG = {
             'high_vol_multiplier': 1.2,
         },
 
+        # 追踪止盈：门槛从3%提升至6%
         'trailing_stops': [
-            {'profit_threshold': 0.03, 'trigger_drawdown': 0.02,  'trailing_pct': 0.02},
-            {'profit_threshold': 0.06, 'trigger_drawdown': 0.025, 'trailing_pct': 0.025},
-            {'profit_threshold': 0.12, 'trigger_drawdown': 0.03,  'trailing_pct': 0.03},
+            {'profit_threshold': 0.06, 'trigger_drawdown': 0.03,  'trailing_pct': 0.025},
+            {'profit_threshold': 0.12, 'trigger_drawdown': 0.035, 'trailing_pct': 0.03},
+            {'profit_threshold': 0.20, 'trigger_drawdown': 0.045, 'trailing_pct': 0.04},
         ],
 
         'risk_per_trade': 0.01,
         'max_trade_amount': 80,
-        'profit_target_atr': 3.0,
+        'profit_target_atr': 6.0,    # 提升至 6×ATR
+        'min_profit_pct': 0.008,     # 最小盈利保护：0.8%
 
         'time_decay': {
             'enabled': True,
             'intervals': [
-                {'hours': 1,  'multiplier': 1.0},
-                {'hours': 4,  'multiplier': 0.9},
-                {'hours': 12, 'multiplier': 0.7},
-                {'hours': 24, 'multiplier': 0.5},
-                {'hours': float('inf'), 'multiplier': 0.3}
+                {'hours': 12,  'multiplier': 1.0},
+                {'hours': 24,  'multiplier': 1.0},
+                {'hours': 48,  'multiplier': 0.9},
+                {'hours': 72,  'multiplier': 0.75},
+                {'hours': float('inf'), 'multiplier': 0.6}
             ]
         }
     },
     'SOL/USDT': {
-        'adx_threshold': 22,        # 从 25 降至 22
-        'rsi_oversold': 30,         # 从 25 升至 30，更实际
-        'rsi_overbought': 75,        # 从 80 降至 75
+        'adx_threshold': 25,        # SOL波动大，要求更强趋势
+        'rsi_oversold': 30,
+        'rsi_overbought': 75,
         'trade_amount': 10,
-        'stop_loss_pct': 0.05,
+        'stop_loss_pct': 0.06,      # SOL波动更大，止损稍宽
 
-        'volume_threshold': 1.5,    # 从 2.0 降至 1.5（SOL波动较大，保持稍高要求）
+        'volume_threshold': 1.8,    # SOL量能要求更高
         'volume_ma_period': 20,
 
         'atr_period': 14,
@@ -140,24 +145,26 @@ STRATEGY_CONFIG = {
             'high_vol_multiplier': 1.3,
         },
 
+        # 追踪止盈：门槛从4%提升至8%
         'trailing_stops': [
-            {'profit_threshold': 0.04, 'trigger_drawdown': 0.025, 'trailing_pct': 0.025},
-            {'profit_threshold': 0.08, 'trigger_drawdown': 0.03,  'trailing_pct': 0.03},
-            {'profit_threshold': 0.15, 'trigger_drawdown': 0.035, 'trailing_pct': 0.035},
+            {'profit_threshold': 0.08, 'trigger_drawdown': 0.035, 'trailing_pct': 0.03},
+            {'profit_threshold': 0.15, 'trigger_drawdown': 0.04,  'trailing_pct': 0.035},
+            {'profit_threshold': 0.25, 'trigger_drawdown': 0.05,  'trailing_pct': 0.045},
         ],
 
         'risk_per_trade': 0.01,
         'max_trade_amount': 50,
-        'profit_target_atr': 3.5,     # SOL 波动大，止盈目标稍宽
+        'profit_target_atr': 7.0,    # SOL 波动大，止盈目标提升至 7×ATR
+        'min_profit_pct': 0.010,     # SOL 最小盈利保护：1.0%
 
         'time_decay': {
             'enabled': True,
             'intervals': [
-                {'hours': 1,  'multiplier': 1.0},
-                {'hours': 4,  'multiplier': 0.9},
-                {'hours': 12, 'multiplier': 0.7},
-                {'hours': 24, 'multiplier': 0.5},
-                {'hours': float('inf'), 'multiplier': 0.3}
+                {'hours': 12,  'multiplier': 1.0},
+                {'hours': 24,  'multiplier': 1.0},
+                {'hours': 48,  'multiplier': 0.9},
+                {'hours': 72,  'multiplier': 0.75},
+                {'hours': float('inf'), 'multiplier': 0.6}
             ]
         }
     }
@@ -194,39 +201,40 @@ DEFAULT_CONFIG = {
         'high_vol_multiplier': 1.2,
     },
     
-    # 默认分阶段追踪止盈配置
+    # 默认分阶段追踪止盈配置（门槛提升，给利润更大运行空间）
     'trailing_stops': [
         {
-            'profit_threshold': 0.02,      # 盈利2%时开启追踪
-            'trigger_drawdown': 0.015,    # 回撤1.5%时触发卖出
-            'trailing_pct': 0.015         # 历史追踪比例（向后兼容）
-        },
-        {
-            'profit_threshold': 0.05,      # 盈利5%时开启追踪
-            'trigger_drawdown': 0.02,     # 回撤2%时触发卖出
+            'profit_threshold': 0.05,      # 盈利5%时才开启追踪
+            'trigger_drawdown': 0.025,    # 回撤2.5%时触发卖出
             'trailing_pct': 0.02
         },
         {
             'profit_threshold': 0.10,      # 盈利10%时开启追踪
-            'trigger_drawdown': 0.025,    # 回撤2.5%时触发卖出
+            'trigger_drawdown': 0.03,     # 回撤3%时触发卖出
             'trailing_pct': 0.025
+        },
+        {
+            'profit_threshold': 0.18,      # 盈利18%时开启追踪
+            'trigger_drawdown': 0.04,     # 回撤4%时触发卖出
+            'trailing_pct': 0.035
         },
     ],
 
     # 波动率自适应仓位
     'risk_per_trade': 0.01,
     'max_trade_amount': 100,
-    'profit_target_atr': 3.0,
+    'profit_target_atr': 6.0,       # 4h框架下提升止盈目标
+    'min_profit_pct': 0.008,        # 最小盈利保护（默认0.8%）
 
-    # 默认时间衰减配置（持仓越久，止损越紧）
+    # 时间衰减配置（4h框架下延长观察期）
     'time_decay': {
         'enabled': True,
         'intervals': [
-            {'hours': 1, 'multiplier': 1.0},
-            {'hours': 4, 'multiplier': 0.9},
-            {'hours': 12, 'multiplier': 0.7},
-            {'hours': 24, 'multiplier': 0.5},
-            {'hours': float('inf'), 'multiplier': 0.3}
+            {'hours': 12, 'multiplier': 1.0},
+            {'hours': 24, 'multiplier': 1.0},
+            {'hours': 48, 'multiplier': 0.9},
+            {'hours': 72, 'multiplier': 0.75},
+            {'hours': float('inf'), 'multiplier': 0.6}
         ]
     }
 }
@@ -247,7 +255,7 @@ CORRELATION_GROUPS = {
 MAX_CORRELATED_POSITIONS = 1  # 同组最多持仓数
 
 # 多时间框架配置
-HIGHER_TIMEFRAME = '4h'    # 高级时间框架用于趋势过滤
+HIGHER_TIMEFRAME = '1d'    # 高级时间框架：日线用于趋势过滤（主框架升至4h后，高级框架升至1d）
 
 # 是否开启实盘下单：True 为真实下单，False 为模拟运行
 LIVE_TRADE = False

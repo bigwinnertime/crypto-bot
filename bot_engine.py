@@ -63,7 +63,9 @@ class AdvancedTradingBot:
             fuse_limit=config.DRAWDOWN_FUSE
         )
 
-        # 信号确认：已重构为单线确认即入场，不再记录上一轮信号
+        # 信号二次确认机制：连续2轮触发同方向信号才执行，过滤假突破
+        # 格式: { 'BTC/USDT': {'signal': 'BUY', 'mode': 'TREND_MACD_GOLDEN_CROSS', 'count': 1} }
+        self.pending_signals = {}
 
         init_remote_control(self.risk)
         self.cmd_thread = threading.Thread(target=start_remote_listener, daemon=True)
@@ -126,7 +128,7 @@ class AdvancedTradingBot:
             logger.warning(f"{symbol} 数据不足（{len(df)}根），跳过信号判定")
             return "HOLD", "INSUFFICIENT_DATA"
 
-        spec = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
+        spec = self.risk.get_effective_config(symbol)
 
         close = df['close']
         high = df['high']
@@ -168,6 +170,8 @@ class AdvancedTradingBot:
         candle_range = high.iloc[-1] - low.iloc[-1]
         buy_vol_ratio = (volume.iloc[-1] * (candle_body / candle_range)) if candle_range > 0 else 0
         is_green_candle = candle_body > 0
+        # 阳线实体比例：实体占K线总高度的比例（过滤十字星、影线过长的弱信号K线）
+        candle_body_ratio = abs(candle_body) / candle_range if candle_range > 0 else 0
 
         # 波动率自适应参数
         adjusted = self._adjust_params_by_volatility(spec, atr_pct)
@@ -185,7 +189,7 @@ class AdvancedTradingBot:
             price, adx_val, rsi_val, rsi_prev, rsi_3_ago, sma20, sma60,
             macd_line, macd_sig, macd_prev,
             bb_lower, bb_mid, bb_upper, vol_ratio, spec, adjusted,
-            is_green_candle
+            is_green_candle, candle_body_ratio
         )
         if buy_reason:
             return "BUY", buy_reason
@@ -234,8 +238,8 @@ class AdvancedTradingBot:
           1. ATR 追踪止损
           2. 固定止损
           3. 主动止盈（盈利达 N×ATR）
-          4. RSI 超买（盈利 > 5% 时）
-          5. MACD 死叉 + ADX 趋弱（仅弱趋势中）
+          4. RSI 超买（盈利 > 5% 时）+ 最小盈利保护
+          5. MACD 死叉 + ADX 趋弱（仅弱趋势/震荡中）+ 最小盈利保护
         """
         pos = self.risk.state['positions'].get(symbol)
         if not pos:
@@ -247,29 +251,36 @@ class AdvancedTradingBot:
         profit_pct = (price - entry_price) / entry_price
         profit_in_atr = (price - entry_price) / atr if atr > 0 else 0
 
-        # 1. ATR 追踪止损
-        trail_stop = highest_price - atr_multi * atr
-        if price <= trail_stop:
-            return f"ATR追踪止损 (价{price:.2f}≤线{trail_stop:.2f})"
+        # 最小盈利保护阈值：盈利低于此值时，不触发主动卖出（止损除外）
+        min_profit_pct = spec.get('min_profit_pct', 0.008)
 
-        # 2. 固定止损
-        hard_stop = entry_price * (1 - spec.get('stop_loss_pct', 0.03))
+        # 1. ATR 追踪止损（无条件触发，止损优先）
+        # 注意：atr<=0 时跳过此检查，避免 trail_stop=highest_price 导致刚买入就误触发
+        if atr > 0:
+            trail_stop = highest_price - atr_multi * atr
+            if price <= trail_stop:
+                return f"ATR追踪止损 (价{price:.2f}≤线{trail_stop:.2f})"
+
+        # 2. 固定止损（无条件触发）
+        hard_stop = entry_price * (1 - spec.get('stop_loss_pct', 0.04))
         if price <= hard_stop:
             return f"固定止损 (价{price:.2f}≤线{hard_stop:.2f})"
 
-        # 3. 主动止盈：盈利达到 N×ATR 时锁定利润
-        profit_target = spec.get('profit_target_atr', 3.0)
+        # 3. 主动止盈：盈利达到 N×ATR 时锁定利润（无条件触发，高利润已覆盖手续费）
+        profit_target = spec.get('profit_target_atr', 6.0)
         if profit_in_atr >= profit_target:
             return f"主动止盈 (盈利{profit_in_atr:.1f}×ATR ≥ {profit_target:.0f}×ATR)"
 
-        # 4. RSI 超买（仅在盈利 > 5% 时触发）
-        if profit_pct > 0.05 and rsi > adjusted['rsi_overbought']:
+        # === 以下为主动卖出信号，仅在盈利足够时触发（最小盈利保护）===
+
+        # 4. RSI 超买（盈利 > 5% 且超过最小盈利保护时触发）
+        if profit_pct > 0.05 and profit_pct > min_profit_pct and rsi > adjusted['rsi_overbought']:
             return f"RSI超买预警 (RSI={rsi:.1f}>阈值{adjusted['rsi_overbought']:.0f})"
 
-        # 5. MACD 死叉 + ADX 趋弱（仅在弱趋势/震荡中使用，强趋势中忽略）
+        # 5. MACD 死叉 + ADX 趋弱（仅在弱趋势/震荡中使用，且盈利需超过最小保护阈值）
         strong_trend_threshold = adjusted['adx_threshold'] * 1.5
         macd_dead = (macd_prev > macd_sig and macd < macd_sig)
-        if macd_dead and adx < strong_trend_threshold:
+        if macd_dead and adx < strong_trend_threshold and profit_pct > min_profit_pct:
             if adx < adjusted['adx_threshold'] * 0.75:
                 return "MACD死叉+ADX趋弱"
 
@@ -283,24 +294,33 @@ class AdvancedTradingBot:
                     sma20, sma60,
                     macd, macd_sig, macd_prev,
                     bb_lower, bb_mid, bb_upper, vol_ratio, spec, adjusted,
-                    is_green_candle=True):
+                    is_green_candle=True, candle_body_ratio=0.0):
         """
         四套买入逻辑（任意一套命中 + 量能确认 → 买入）：
-          A. 趋势跟随：MACD 金叉 + ADX 确认 + 量能
+          A. 趋势跟随：MACD 金叉 + ADX 确认 + 量能 + MACD零轴过滤
           B. RSI 反弹：RSI 上穿 50 + 价格站稳布林中轨 + 趋势确认 + 量能
-          C. 布林支撑：价格触下轨 + 真正 RSI 底背离 + 量能
-          D. SMA20 突破：价格站上 SMA20 + RSI 健康 + 量能
+          C. 布林支撑：价格触下轨 + RSI 底背离 + 量能
+          D. SMA20 突破：价格站上 SMA20 + RSI 健康 + 量能 + 阳线质量
+
+        新增过滤器（减少假信号）：
+          - MACD零轴过滤：趋势信号要求MACD线在零轴附近或以上
+          - 阳线实体质量：实体占K线高度30%以上才认为有效突破
         """
         vol_thr = spec.get('volume_threshold', 1.5)
 
-        # ── A. 趋势跟随（MACD 金叉 + 量能放大）
+        # ── A. 趋势跟随（MACD 金叉 + 量能放大 + MACD零轴过滤）
         macd_golden = (macd_prev < macd_sig and macd > macd_sig)
+        # MACD零轴过滤：金叉发生在零轴以上或接近零轴（-0.1%容错）时信号更可靠
+        macd_above_zero = macd > -abs(macd_sig) * 0.5
+        # 阳线质量检查：实体比例 > 30% 才认为有效（过滤十字星等无效信号）
+        quality_candle = candle_body_ratio > 0.30
+
         if adx > adjusted['adx_threshold'] * 0.8:
-            if macd_golden and vol_ratio >= vol_thr and is_green_candle:
+            if macd_golden and macd_above_zero and vol_ratio >= vol_thr and is_green_candle and quality_candle:
                 return "TREND_MACD_GOLDEN_CROSS"
             if (adx > adjusted['adx_threshold'] and
                     vol_ratio >= vol_thr and
-                    price > sma20 and rsi > 50 and is_green_candle):
+                    price > sma20 and rsi > 50 and is_green_candle and quality_candle):
                 return "TREND_ADX_VOL_CONFIRM"
 
         # ── B. RSI 均线交叉反弹（RSI 上穿 50 + 趋势过滤）
@@ -310,18 +330,18 @@ class AdvancedTradingBot:
         if rsi_cross_50 and trend_ok and price > bb_mid and vol_ratio >= vol_thr * 0.8:
             return "RSI_50_CROSS_BOUNCE"
 
-        # ── C. 布林下轨支撑 + RSI 底背离
+        # ── C. 布林下轨支撑 + RSI 底背离（严格版：要求连续2根K线RSI回升）
         touch_lower = price <= bb_lower * 1.005
         bb_width = (bb_upper - bb_lower) / price
         bb_sufficient = bb_width > 0.02
-        rsi_bouncing = (rsi_3_ago is not None and rsi > rsi_3_ago and rsi < 35)
+        rsi_bouncing = (rsi_3_ago is not None and rsi > rsi_prev > rsi_3_ago and rsi < 35)
         if touch_lower and bb_sufficient and rsi_bouncing and vol_ratio >= vol_thr * 0.8:
             return "BB_LOWER_RSI_DIVERGENCE"
 
-        # ── D. SMA20 突破
+        # ── D. SMA20 突破（增加阳线质量过滤）
         macd_dead = (macd_prev > macd_sig and macd < macd_sig)
         if (price > sma20 and rsi > 55 and
-                vol_ratio >= vol_thr and not macd_dead and is_green_candle):
+                vol_ratio >= vol_thr and not macd_dead and is_green_candle and quality_candle):
             return "SMA20_BREAKOUT"
 
         return None
@@ -331,7 +351,7 @@ class AdvancedTradingBot:
     # ═══════════════════════════════════════════════════
 
     def _calc_position_size(self, symbol, price, atr, total_usdt):
-        spec = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
+        spec = self.risk.get_effective_config(symbol)
         risk_per_trade = spec.get('risk_per_trade', 0.01)
         max_trade_amount = spec.get('max_trade_amount', spec.get('trade_amount', 20))
         atr_multiplier = spec.get('atr_multiplier', 2.0)
@@ -354,37 +374,47 @@ class AdvancedTradingBot:
     # ═══════════════════════════════════════════════════
 
     def _execute_order(self, symbol, side, amount, price, mode):
+        """
+        执行订单。
+        返回: (success, fill_price, fill_amount)
+          - 模拟交易: fill_price=信号价, fill_amount=计算量
+          - 实盘交易: fill_price/fill_amount 从订单响应中提取真实成交数据
+        """
         FEE_RATE = 0.001
 
         if not config.LIVE_TRADE:
             success, main_val, fee, trade_pnl = self.risk.execute_virtual_trade(symbol, side, amount, price, FEE_RATE)
-            
+
             if side == 'buy':
                 if not success:
                     logger.error(f"❌ 模拟购买失败：虚拟余额不足！(含手续费需: {main_val:.2f})")
-                    return False
-                
+                    return False, None, None
+
                 logger.info(f"🧪 [模拟买入] 成交:{main_val:.2f} | 手续费:{fee:.2f} | 剩余余额:{self.risk.state['virtual_account']['balance']:.2f}")
 
             elif side == 'sell':
                 if not success:
-                    return False
+                    return False, None, None
                 logger.info(f"🧪 [模拟卖出] 净收入:{main_val:.2f} | 单笔净盈亏:{trade_pnl:.2f}")
 
-            return True
+            return True, price, amount
 
         try:
             if side == 'buy':
                 order = self.exchange.create_market_buy_order(symbol, amount)
-                logger.info(f"✅ [实盘买入] {symbol} 订单已执行: {order['id']}")
-                return True
+                fill_price = order.get('average') or order.get('price') or price
+                fill_amount = order.get('filled', amount)
+                logger.info(f"✅ [实盘买入] {symbol} 订单已执行: {order['id']} | 成交价:{fill_price} | 成交量:{fill_amount}")
+                return True, fill_price, fill_amount
             elif side == 'sell':
                 order = self.exchange.create_market_sell_order(symbol, amount)
-                logger.info(f"✅ [实盘卖出] {symbol} 订单已执行: {order['id']}")
-                return True
+                fill_price = order.get('average') or order.get('price') or price
+                fill_amount = order.get('filled', amount)
+                logger.info(f"✅ [实盘卖出] {symbol} 订单已执行: {order['id']} | 成交价:{fill_price} | 成交量:{fill_amount}")
+                return True, fill_price, fill_amount
         except Exception as e:
             logger.error(f"❌ [实盘{side}] 订单执行失败: {e}")
-            return False
+            return False, None, None
 
     # ═══════════════════════════════════════════════════
     #  主循环
@@ -405,35 +435,55 @@ class AdvancedTradingBot:
                     if df.empty:
                         continue
 
-                    # 按币种独立熔断检查
-                    if self.risk.check_circuit_breaker(symbol, df):
-                        send_notification(f"🚨 熔断: {symbol}", "检测到异常跌幅，该币种已暂停交易。")
-                        continue
+                    # 按币种独立熔断检查（检测暴跌、管理熔断过期）
+                    was_fused = self.risk.is_symbol_fused(symbol)
+                    self.risk.check_circuit_breaker(symbol, df)
+                    is_fused = self.risk.is_symbol_fused(symbol)
+
+                    # 仅在首次触发熔断时发送通知（避免每轮循环重复发送）
+                    if is_fused and not was_fused:
+                        send_notification(f"🚨 熔断: {symbol}",
+                                          "检测到异常跌幅，该币种已暂停买入。已有持仓将继续监控止盈止损。")
 
                     price = df['close'].iloc[-1]
                     pos = self.risk.state['positions'].get(symbol)
 
-                    # --- 第一步：追踪止盈（风控层） ---
-                    trailing_reason = self.risk.update_trailing_stop(symbol, price, df)
-                    if trailing_reason and pos:
-                        if self._execute_order(symbol, 'sell', pos['amount'], price, trailing_reason):
-                            logger.warning(f"🚨 {symbol} 触发 {trailing_reason}")
-                            pnl = (price / pos['entry_price'] - 1) * 100
-                            send_notification(f"🆘 离场通知: {symbol}",
-                                              f"<b>原因</b>: {trailing_reason}\n<b>收益率</b>: {pnl:.2f}%")
-                            self.risk.execute_sell_update(symbol, price, trailing_reason)
-                        continue
+                    # --- 第一步：追踪止盈（风控层，熔断时仍执行） ---
+                    if pos:
+                        trailing_reason = self.risk.update_trailing_stop(symbol, price, df)
+                        if trailing_reason:
+                            success, fill_price, fill_amount = self._execute_order(
+                                symbol, 'sell', pos['amount'], price, trailing_reason)
+                            if success:
+                                logger.warning(f"🚨 {symbol} 触发 {trailing_reason}")
+                                pnl = (fill_price / pos['entry_price'] - 1) * 100
+                                send_notification(f"🆘 离场通知: {symbol}",
+                                                  f"<b>原因</b>: {trailing_reason}\n<b>收益率</b>: {pnl:.2f}%")
+                                self.risk.execute_sell_update(symbol, fill_price, trailing_reason)
+                            continue
 
                     # --- 第二步：策略信号判定 ---
                     signal, mode = self.get_strategy_signal(df, symbol)
 
-                    # --- 第三步：信号确认（重构：取消延迟，单线确认即入场） ---
-                    if signal == "BUY":
-                        confirmed_mode = mode
+                    # --- 第三步：信号确认（连续2轮相同信号才入场，过滤假突破）---
+                    confirmed_mode = None
+                    if signal == "BUY" and not is_fused:
+                        prev = self.pending_signals.get(symbol, {})
+                        if prev.get('signal') == 'BUY' and prev.get('mode') == mode:
+                            # 连续第2轮触发相同买入信号，确认入场
+                            confirmed_mode = mode
+                            logger.info(f"✅ {symbol} 信号二次确认: {mode}")
+                            self.pending_signals.pop(symbol, None)
+                        else:
+                            # 第1轮，记录信号，等待下一轮确认
+                            self.pending_signals[symbol] = {'signal': 'BUY', 'mode': mode}
+                            logger.info(f"⏳ {symbol} 等待信号二次确认: {mode} (第1/2轮)")
                     else:
-                        confirmed_mode = None
+                        # 非BUY信号或熔断状态，清除待确认状态
+                        if symbol in self.pending_signals:
+                            self.pending_signals.pop(symbol, None)
 
-                    # --- 第四步：多时间框架过滤 + 执行买入 ---
+                    # --- 第四步：多时间框架过滤 + 执行买入（熔断时跳过） ---
                     if confirmed_mode and self.risk.can_open_position(symbol, total_usdt):
                         # 多时间框架趋势检查
                         htf_trend = self._check_higher_tf_trend(symbol)
@@ -447,20 +497,29 @@ class AdvancedTradingBot:
 
                         htf_label = "↗上升" if htf_trend == 1 else "→震荡"
                         logger.info(f"📤 准备执行买入: {symbol}, 金额: {trade_amount:.2f}, 价格: {price:.2f}, 4h趋势: {htf_label}")
-                        if self._execute_order(symbol, 'buy', amount, price, confirmed_mode):
-                            self.risk.execute_buy_update(symbol, price, amount, trade_amount, confirmed_mode)
+                        success, fill_price, fill_amount = self._execute_order(
+                            symbol, 'buy', amount, price, confirmed_mode)
+                        if success:
+                            actual_cost = fill_amount * fill_price if config.LIVE_TRADE else trade_amount
+                            self.risk.execute_buy_update(symbol, fill_price, fill_amount, actual_cost, confirmed_mode)
                             safe_mode = confirmed_mode.replace("_", " ")
                             send_notification(f"✅ 买入成交: {symbol}",
-                                              f"<b>价格</b>: {price}\n<b>金额</b>: {trade_amount:.2f} USDT\n<b>模式</b>: {safe_mode}\n<b>4h趋势</b>: {htf_label}")
+                                              f"<b>价格</b>: {fill_price}\n<b>金额</b>: {actual_cost:.2f} USDT\n<b>模式</b>: {safe_mode}\n<b>4h趋势</b>: {htf_label}")
+                            # 买入后刷新可用余额，避免后续币种基于过期余额过度下单
+                            if not config.LIVE_TRADE:
+                                total_usdt = self.risk.state['virtual_account']['balance']
 
-                    # --- 第五步：执行策略卖出 ---
+                    # --- 第五步：执行策略卖出（熔断时仍执行） ---
                     elif signal == "SELL" and pos:
-                        if self._execute_order(symbol, 'sell', pos['amount'], price, mode):
-                            pnl_pct = self.risk.execute_sell_update(symbol, price, mode)
+                        success, fill_price, fill_amount = self._execute_order(
+                            symbol, 'sell', pos['amount'], price, mode)
+                        if success:
+                            pnl_pct = self.risk.execute_sell_update(symbol, fill_price, mode)
+                            pnl_display = f"{pnl_pct:.2f}%" if pnl_pct is not None else "N/A"
                             send_notification(f"🔻 卖出成交: {symbol}",
-                                              f"<b>收益率</b>: {pnl_pct:.2f}%")
+                                              f"<b>收益率</b>: {pnl_display}")
 
-                time.sleep(60)
+                time.sleep(240)  # 4h框架下每4分钟检查一次，减少不必要的API调用
             except Exception as e:
                 logger.error(f"运行异常: {e}")
                 time.sleep(10)

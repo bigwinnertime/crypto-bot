@@ -193,6 +193,7 @@ class RiskManager:
         equity_high = self.state.get('equity_high', current_balance)
         if current_balance > equity_high:
             self.state['equity_high'] = current_balance
+            self.save_state()
             return False
 
         # 计算回撤
@@ -249,32 +250,10 @@ class RiskManager:
         pos = self.state['positions'][symbol]
 
         # --- 1. 参数获取 ---
-        try:
-            import config
-            runtime_cfg = self.state.get('runtime_config', {}).get(symbol, {})
-            spec_cfg = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
-        except ImportError:
-            runtime_cfg = self.state.get('runtime_config', {}).get(symbol, {})
-            spec_cfg = {
-                'trailing_stops': [
-                    {'profit_threshold': 0.02, 'trigger_drawdown': 0.015, 'trailing_pct': 0.015},
-                    {'profit_threshold': 0.05, 'trigger_drawdown': 0.02, 'trailing_pct': 0.02},
-                    {'profit_threshold': 0.10, 'trigger_drawdown': 0.025, 'trailing_pct': 0.025},
-                ],
-                'time_decay': {
-                    'enabled': True,
-                    'intervals': [
-                        {'hours': 1, 'multiplier': 1.0},
-                        {'hours': 4, 'multiplier': 0.9},
-                        {'hours': 12, 'multiplier': 0.7},
-                        {'hours': 24, 'multiplier': 0.5},
-                        {'hours': float('inf'), 'multiplier': 0.3}
-                    ]
-                }
-            }
+        spec_cfg = self.get_effective_config(symbol)
 
-        trailing_stops = runtime_cfg.get('trailing_stops', spec_cfg.get('trailing_stops', []))
-        time_decay_cfg = runtime_cfg.get('time_decay', spec_cfg.get('time_decay', {}))
+        trailing_stops = spec_cfg.get('trailing_stops', [])
+        time_decay_cfg = spec_cfg.get('time_decay', {})
 
         # --- 2. 更新最高价 ---
         if 'highest_price' not in pos:
@@ -345,31 +324,13 @@ class RiskManager:
         pos = self.state['positions'][symbol]
 
         try:
+            spec_cfg = self.get_effective_config(symbol)
+        except Exception:
             import config
-            runtime_cfg = self.state.get('runtime_config', {}).get(symbol, {})
             spec_cfg = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
-        except ImportError:
-            runtime_cfg = self.state.get('runtime_config', {}).get(symbol, {})
-            spec_cfg = {
-                'trailing_stops': [
-                    {'profit_threshold': 0.02, 'trailing_pct': 0.015},
-                    {'profit_threshold': 0.05, 'trailing_pct': 0.02},
-                    {'profit_threshold': 0.10, 'trailing_pct': 0.025},
-                ],
-                'time_decay': {
-                    'enabled': True,
-                    'intervals': [
-                        {'hours': 1, 'multiplier': 1.0},
-                        {'hours': 4, 'multiplier': 0.9},
-                        {'hours': 12, 'multiplier': 0.7},
-                        {'hours': 24, 'multiplier': 0.5},
-                        {'hours': float('inf'), 'multiplier': 0.3}
-                    ]
-                }
-            }
 
-        trailing_stops = runtime_cfg.get('trailing_stops', spec_cfg.get('trailing_stops', []))
-        time_decay_cfg = runtime_cfg.get('time_decay', spec_cfg.get('time_decay', {}))
+        trailing_stops = spec_cfg.get('trailing_stops', [])
+        time_decay_cfg = spec_cfg.get('time_decay', {})
 
         highest_profit_reached = (pos['highest_price'] - pos['entry_price']) / pos['entry_price']
         drawdown = (pos['highest_price'] - current_price) / pos['highest_price']
@@ -417,6 +378,29 @@ class RiskManager:
     # ═══════════════════════════════════════════════════
     #  运行时配置 & 交易更新
     # ═══════════════════════════════════════════════════
+
+    def get_effective_config(self, symbol):
+        """
+        获取币种的有效配置：将 runtime_config（远程命令修改的参数）
+        合并覆盖到静态 STRATEGY_CONFIG 之上，确保 /set_sl、/set_ts 等命令生效。
+        """
+        import config
+
+        base_cfg = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
+        runtime_cfg = self.state.get('runtime_config', {}).get(symbol, {})
+
+        effective = copy.deepcopy(base_cfg)
+        for key, value in runtime_cfg.items():
+            effective[key] = value
+
+        # 如果远程设置了统一的 trailing_stop_pct，覆盖所有分阶段追踪止盈的 trigger_drawdown
+        uniform_ts = runtime_cfg.get('trailing_stop_pct')
+        if uniform_ts is not None and effective.get('trailing_stops'):
+            effective['trailing_stops'] = copy.deepcopy(effective['trailing_stops'])
+            for stop in effective['trailing_stops']:
+                stop['trigger_drawdown'] = uniform_ts
+
+        return effective
 
     def update_runtime_config(self, symbol, key, value):
         """安全地更新运行时配置"""
