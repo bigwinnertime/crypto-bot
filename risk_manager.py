@@ -1,6 +1,7 @@
 import json
 import copy
 import os
+import tempfile
 import time
 import logging
 import threading
@@ -48,7 +49,7 @@ class RiskManager:
                 if not os.path.exists(self.state_file):
                     return copy.deepcopy(defaults)
 
-                with open(self.state_file, 'r') as f:
+                with open(self.state_file, 'r', encoding='utf-8') as f:
                     state = json.load(f)
 
                 for key, value in defaults.items():
@@ -66,13 +67,29 @@ class RiskManager:
                 return copy.deepcopy(defaults)
 
     def save_state(self):
-        """持久化保存当前持仓和熔断状态"""
+        """
+        原子化持久化状态：先写到同目录下的临时文件，再 os.replace 替换目标文件。
+        os.replace 在 POSIX 上是原子 rename，崩溃不会留下半截 JSON；
+        同目录确保不跨文件系统、rename 真正原子。
+        """
         with self._file_lock:
+            tmp_path = None
             try:
-                with open(self.state_file, 'w', encoding='utf-8') as f:
+                state_dir = os.path.dirname(os.path.abspath(self.state_file))
+                tmp_fd, tmp_path = tempfile.mkstemp(
+                    dir=state_dir, prefix='.bot_state_', suffix='.tmp'
+                )
+                with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
                     json.dump(self.state, f, indent=4, ensure_ascii=False)
+                os.replace(tmp_path, self.state_file)
+                tmp_path = None  # 已成功 rename，无需清理
             except Exception as e:
                 logger.error(f"保存状态文件失败: {e}")
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
 
     # ═══════════════════════════════════════════════════
     #  熔断机制（按币种独立）
@@ -243,60 +260,64 @@ class RiskManager:
     # ═══════════════════════════════════════════════════
 
     def update_trailing_stop(self, symbol, current_price, df=None):
-        """分阶段追踪止盈 + 时间衰减。仅趋势仓位使用，均值回归仓位退出由 bot_engine._should_sell 处理。"""
-        if symbol not in self.state['positions']:
+        """分阶段追踪止盈 + 时间衰减。仅趋势仓位使用，均值回归仓位退出由 bot_engine._should_sell 处理。
+
+        修复 #14：此前 pos['highest_price'] 的读写未加 _file_lock，Telegram 线程在
+        get_trailing_stop_status 里同时读，主线程在写，存在竞态。现整个函数体放进锁内。
+        """
+        with self._file_lock:
+            pos = self.state['positions'].get(symbol)
+            if not pos:
+                return None
+
+            # 均值回归仓位不使用追踪止盈，其退出逻辑在 _should_sell 中独立处理
+            if pos.get('strategy_type') == 'meanrev':
+                return None
+
+            # --- 1. 参数获取 ---
+            spec_cfg = self.get_effective_config(symbol)
+
+            trailing_stops = spec_cfg.get('trailing_stops', [])
+            time_decay_cfg = spec_cfg.get('time_decay', {})
+
+            # --- 2. 更新最高价 ---
+            if 'highest_price' not in pos:
+                pos['highest_price'] = pos['entry_price']
+
+            if current_price > pos['highest_price']:
+                pos['highest_price'] = current_price
+                self.save_state()
+                return None
+
+            # --- 3. 计算基础比例 ---
+            drawdown = (pos['highest_price'] - current_price) / pos['highest_price']
+            highest_profit_reached = (pos['highest_price'] - pos['entry_price']) / pos['entry_price']
+
+            # --- 4. 分阶段追踪止盈逻辑 ---
+            active_trigger_drawdown = None
+
+            sorted_stops = sorted(trailing_stops, key=lambda x: x['profit_threshold'], reverse=True)
+            for stop_config in sorted_stops:
+                if highest_profit_reached >= stop_config['profit_threshold']:
+                    active_trigger_drawdown = stop_config.get('trigger_drawdown', stop_config.get('trailing_pct', 0.02))
+                    break
+
+            if active_trigger_drawdown is None:
+                logger.debug(f"{symbol} 盈利 {highest_profit_reached:.2%}，未达到追踪止盈门槛")
+                return None
+
+            # 应用时间衰减（持仓越久，止损越紧）
+            if time_decay_cfg.get('enabled', False):
+                time_multiplier = self._calculate_time_multiplier(pos, time_decay_cfg)
+                adjusted_trigger_drawdown = active_trigger_drawdown / time_multiplier
+
+                logger.debug(f"{symbol} 追踪止盈: 原始{active_trigger_drawdown:.2%} -> 调整后{adjusted_trigger_drawdown:.2%} (时间系数{time_multiplier:.2f})")
+                active_trigger_drawdown = adjusted_trigger_drawdown
+
+            if drawdown >= active_trigger_drawdown:
+                return f"追踪止盈 (回撤 {drawdown:.2%}, 设定阈值 {active_trigger_drawdown:.2%})"
+
             return None
-
-        pos = self.state['positions'][symbol]
-
-        # 均值回归仓位不使用追踪止盈，其退出逻辑在 _should_sell 中独立处理
-        if pos.get('strategy_type') == 'meanrev':
-            return None
-
-        # --- 1. 参数获取 ---
-        spec_cfg = self.get_effective_config(symbol)
-
-        trailing_stops = spec_cfg.get('trailing_stops', [])
-        time_decay_cfg = spec_cfg.get('time_decay', {})
-
-        # --- 2. 更新最高价 ---
-        if 'highest_price' not in pos:
-            pos['highest_price'] = pos['entry_price']
-
-        if current_price > pos['highest_price']:
-            pos['highest_price'] = current_price
-            self.save_state()
-            return None
-
-        # --- 3. 计算基础比例 ---
-        drawdown = (pos['highest_price'] - current_price) / pos['highest_price']
-        highest_profit_reached = (pos['highest_price'] - pos['entry_price']) / pos['entry_price']
-
-        # --- 4. 分阶段追踪止盈逻辑 ---
-        active_trigger_drawdown = None
-
-        sorted_stops = sorted(trailing_stops, key=lambda x: x['profit_threshold'], reverse=True)
-        for stop_config in sorted_stops:
-            if highest_profit_reached >= stop_config['profit_threshold']:
-                active_trigger_drawdown = stop_config.get('trigger_drawdown', stop_config.get('trailing_pct', 0.02))
-                break
-
-        if active_trigger_drawdown is None:
-            logger.debug(f"{symbol} 盈利 {highest_profit_reached:.2%}，未达到追踪止盈门槛")
-            return None
-
-        # 应用时间衰减（持仓越久，止损越紧）
-        if time_decay_cfg.get('enabled', False):
-            time_multiplier = self._calculate_time_multiplier(pos, time_decay_cfg)
-            adjusted_trigger_drawdown = active_trigger_drawdown / time_multiplier
-
-            logger.debug(f"{symbol} 追踪止盈: 原始{active_trigger_drawdown:.2%} -> 调整后{adjusted_trigger_drawdown:.2%} (时间系数{time_multiplier:.2f})")
-            active_trigger_drawdown = adjusted_trigger_drawdown
-
-        if drawdown >= active_trigger_drawdown:
-            return f"追踪止盈 (回撤 {drawdown:.2%}, 设定阈值 {active_trigger_drawdown:.2%})"
-
-        return None
 
     def _calculate_time_multiplier(self, position, time_decay_cfg):
         """计算时间衰减系数（持仓越久，返回值越小，止损越紧）"""
@@ -418,9 +439,30 @@ class RiskManager:
             self.save_state()
             logger.info(f"⚙️ 远程配置更新: {symbol} {key} = {value}")
 
-    def execute_buy_update(self, symbol, price, amount, cost, mode, strategy_type='trend'):
-        """统一封装：买入后的状态更新逻辑"""
+    def execute_buy_update(self, symbol, price, amount, cost, mode, strategy_type='trend', fee_rate=0.001):
+        """
+        原子化买入更新：模拟账户扣款 + 持仓写入 + 一次 save。
+        返回 (success, raw_cost, fee)：
+          - 模拟交易且余额不足：success=False（raw_cost/fee 仍返回供日志使用，状态未变更）
+          - 模拟交易成功：success=True，raw_cost=amount*price，fee=raw_cost*fee_rate
+          - 实盘交易：success=True，raw_cost=0，fee=0（实盘手续费由交易所直接扣除，不在此追踪）
+
+        此前 execute_virtual_trade(buy) 与 execute_buy_update 是两次独立 save_state，
+        崩溃在中间会留下 "余额已扣但 positions 为空" 的脏状态。现合并到一个锁内、只 save 一次。
+        """
+        import config
         with self._file_lock:
+            raw_cost = 0
+            fee = 0
+            if not config.LIVE_TRADE:
+                acc = self.state['virtual_account']
+                raw_cost = amount * price
+                fee = raw_cost * fee_rate
+                total_cost = raw_cost + fee
+                if acc['balance'] < total_cost:
+                    return False, raw_cost, fee
+                acc['balance'] -= total_cost
+                acc['total_fees'] += fee
             self.state['positions'][symbol] = {
                 "entry_price": price,
                 "amount": amount,
@@ -430,15 +472,41 @@ class RiskManager:
                 "time": time.strftime("%Y-%m-%d %H:%M:%S")
             }
             self.save_state()
+            return True, raw_cost, fee
 
-    def execute_sell_update(self, symbol, price, mode):
-        """统一封装：卖出后的状态更新逻辑（计算PnL、存入历史、清空持仓）"""
+    def execute_sell_update(self, symbol, price, mode, fee_rate=0.001):
+        """
+        原子化卖出更新：模拟账户入账 + 历史记录 + 持仓清空 + 一次 save。
+        返回 pnl_pct（百分比），若无持仓返回 None（此时余额、历史均不变）。
+
+        修复 #2 / #27：此前 execute_virtual_trade(sell) 与 execute_sell_update 是两次
+        独立 save_state，中间崩溃会留下 "余额已加但仓位未删" 的脏状态；且 execute_virtual_trade
+        在 pos 已被另一线程清掉时仍会盲目加余额（trade_count 不增）。现在合并到一个锁内：
+        pos 查找与余额变动同生共死，pos 为空直接返回，不动余额。
+        """
+        import config
         with self._file_lock:
-            if symbol not in self.state['positions']:
+            pos = self.state['positions'].get(symbol)
+            if not pos:
                 return None
 
-            pos = self.state['positions'][symbol]
-            pnl_val = (price - pos['entry_price']) * pos['amount']
+            # 模拟账户入账（实盘手续费由交易所扣除，这里只追踪模拟账户）
+            if not config.LIVE_TRADE:
+                acc = self.state['virtual_account']
+                raw_revenue = pos['amount'] * price
+                fee = raw_revenue * fee_rate
+                net_revenue = raw_revenue - fee
+                acc['balance'] += net_revenue
+                acc['total_fees'] += fee
+                trade_pnl_net = net_revenue - pos.get('cost', 0)
+                acc['total_pnl'] += trade_pnl_net
+                acc['trade_count'] += 1
+                # #15: trade_history.pnl_amount 改为净值，与 total_pnl 口径一致
+                pnl_val = trade_pnl_net
+            else:
+                # 实盘无手续费追踪，pnl_amount 用毛值（entry→sell 价差 × 量）
+                pnl_val = (price - pos['entry_price']) * pos['amount']
+
             pnl_pct = (price / pos['entry_price'] - 1) * 100
 
             trade_record = {
@@ -460,40 +528,4 @@ class RiskManager:
             self.save_state()
 
             return pnl_pct
-
-    def execute_virtual_trade(self, symbol, side, amount, price, fee_rate=0.001):
-        """统一封装：线程安全的虚拟账户余额与盈亏计算"""
-        with self._file_lock:
-            acc = self.state['virtual_account']
-            if side == 'buy':
-                raw_cost = amount * price
-                fee = raw_cost * fee_rate
-                total_cost = raw_cost + fee
-                
-                if acc['balance'] < total_cost:
-                    return False, total_cost, fee, 0
-                
-                acc['balance'] -= total_cost
-                acc['total_fees'] += fee
-                self.save_state()
-                return True, raw_cost, fee, 0
-                
-            elif side == 'sell':
-                raw_revenue = amount * price
-                fee = raw_revenue * fee_rate
-                net_revenue = raw_revenue - fee
-                
-                acc['balance'] += net_revenue
-                acc['total_fees'] += fee
-                
-                pos = self.state['positions'].get(symbol)
-                trade_pnl = 0
-                if pos:
-                    trade_pnl = net_revenue - pos.get('cost', 0)
-                    acc['total_pnl'] += trade_pnl
-                    acc['trade_count'] += 1
-                    
-                self.save_state()
-                return True, net_revenue, fee, trade_pnl
-            return False, 0, 0, 0
 

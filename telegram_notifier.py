@@ -2,8 +2,30 @@ import requests
 import config
 import logging
 import time
+import html
 
 logger = logging.getLogger(__name__)
+
+# Telegram HTML 模式支持的格式标签白名单。
+# send_notification 会对动态内容（reason/价格/数值）做 HTML 转义，
+# 但保留这些格式标签，避免调用者手写的 <b></b> 被破坏。
+# 修复：reason 含未转义的 <（如 "ADX=15.3<30.0)"）曾被 Telegram 当成非法标签导致 HTTP 400。
+_ALLOWED_HTML_TAGS = ('b', '/b', 'i', '/i', 'u', '/u', 's', '/s',
+                      'code', '/code', 'pre', '/pre')
+
+
+def _escape_html_keep_tags(text):
+    """转义 HTML 特殊字符（< > &），但保留白名单内的格式标签。
+
+    动态数据（如 exit_reason、数值）里的 < 会被转义为 &lt;，Telegram 正常显示为 <；
+    调用者写的 <b> 等格式标签会被恢复，保持加粗/斜体等样式。
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    escaped = html.escape(text, quote=False)
+    for tag in _ALLOWED_HTML_TAGS:
+        escaped = escaped.replace(f'&lt;{tag}&gt;', f'<{tag}>')
+    return escaped
 
 class TelegramNotifier:
     def __init__(self):
@@ -83,7 +105,11 @@ def send_notification(title, content, **kwargs):
         return False
     
     # 将标题和内容组合，使用 HTML 格式美化（Markdown 对 Emoji 兼容性差）
-    formatted_msg = f"🔔 <b>{title}</b>\n\n{content}"
+    # title/content 都是动态数据，先转义 < > & 防止 Telegram HTML 解析失败，
+    # 再由 _escape_html_keep_tags 保留 <b></b> 等格式标签
+    safe_title = _escape_html_keep_tags(title)
+    safe_content = _escape_html_keep_tags(content)
+    formatted_msg = f"🔔 <b>{safe_title}</b>\n\n{safe_content}"
     
     # 添加调试信息
     logger.info(f"📤 准备发送TG通知: {title}")

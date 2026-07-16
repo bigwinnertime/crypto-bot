@@ -1,6 +1,10 @@
 import os
 import sys
 
+# #22: 编码环境设置——必须在 logging.basicConfig 之前执行（下方 StreamHandler 用 sys.stdout，
+# 若 stdout 编码未先 reconfigure 为 utf-8，中文日志在无 locale 的环境会 UnicodeEncodeError：
+# 某些 Docker 容器 / cron 调度默认 C locale）。故不能移到 if __name__ 块，也不能删。
+# 顺序约束：本块 → imports → logging.basicConfig(StreamHandler(sys.stdout))。
 os.environ['LANG'] = 'en_US.UTF-8'
 os.environ['LC_ALL'] = 'en_US.UTF-8'
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -8,8 +12,7 @@ os.environ['PYTHONIOENCODING'] = 'utf-8'
 if hasattr(sys, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
-from dotenv import load_dotenv
-load_dotenv()
+# .env 由 config.py 统一加载（带绝对路径），这里不再重复 load_dotenv()（#23）
 
 import ccxt
 import copy
@@ -35,7 +38,6 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler("bot_main.log", encoding='utf-8', errors='replace'),
-        logging.FileHandler("bot_run.log", encoding='utf-8', errors='replace'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -93,12 +95,15 @@ class AdvancedTradingBot:
     def _check_higher_tf_trend(self, symbol):
         """
         检查高级时间框架趋势方向。
-        返回: 1 (上升趋势), -1 (下降趋势), 0 (震荡/数据不足)
+        返回: 1 (上升趋势), -1 (下降趋势), 0 (震荡)
+        #13 修复：数据获取失败或指标为 NaN 时返回 -1（fail-safe，抑制买入），
+               而非此前的 0（震荡，允许买入）——避免在 HTF 真实下跌时因 API 失败而误买入。
         """
         htf = getattr(config, 'HIGHER_TIMEFRAME', '4h')
         df_htf = self.fetch_data(symbol, timeframe=htf, limit=60)
         if df_htf.empty or len(df_htf) < 60:
-            return 0
+            logger.warning(f"{symbol} HTF({htf}) 数据不足，fail-safe 视为下跌趋势抑制买入")
+            return -1
 
         close = df_htf['close']
         high = df_htf['high']
@@ -108,6 +113,11 @@ class AdvancedTradingBot:
         sma20_htf = SMAIndicator(close, window=20).sma_indicator().iloc[-1]
         sma60_htf = SMAIndicator(close, window=60).sma_indicator().iloc[-1]
         adx_htf = ADXIndicator(high, low, close).adx().iloc[-1]
+
+        # 指标 NaN 视为数据不足，fail-safe
+        if pd.isna(sma20_htf) or pd.isna(sma60_htf) or pd.isna(adx_htf):
+            logger.warning(f"{symbol} HTF 指标含 NaN，fail-safe 视为下跌趋势抑制买入")
+            return -1
 
         # 上升趋势: SMA20 > SMA60 + 价格 > SMA20 + ADX > 20
         if sma20_htf > sma60_htf and price > sma20_htf and adx_htf > 20:
@@ -182,12 +192,10 @@ class AdvancedTradingBot:
         vol_ma = volume.rolling(spec.get('volume_ma_period', 20)).mean().iloc[-1]
         vol_ratio = volume.iloc[-1] / vol_ma if vol_ma > 0 else 0
 
-        # 成交量方向分析：买入量占比
+        # K线形态分析：阳线判定 + 实体占比（过滤十字星、影线过长的弱信号K线）
         candle_body = close.iloc[-1] - df['open'].iloc[-1]
         candle_range = high.iloc[-1] - low.iloc[-1]
-        buy_vol_ratio = (volume.iloc[-1] * (candle_body / candle_range)) if candle_range > 0 else 0
         is_green_candle = candle_body > 0
-        # 阳线实体比例：实体占K线总高度的比例（过滤十字星、影线过长的弱信号K线）
         candle_body_ratio = abs(candle_body) / candle_range if candle_range > 0 else 0
 
         # 波动率自适应参数
@@ -320,11 +328,13 @@ class AdvancedTradingBot:
         # === 以下为主动卖出信号，仅在盈利足够时触发（最小盈利保护）===
 
         # 4. RSI 超买（盈利 > 5% 且超过最小盈利保护时触发）
-        if profit_pct > 0.05 and profit_pct > min_profit_pct and rsi > adjusted['rsi_overbought']:
-            return f"RSI超买预警 (RSI={rsi:.1f}>阈值{adjusted['rsi_overbought']:.0f})"
+        # #20: 用 .get() 加 fallback，避免 adjusted 缺字段时 KeyError
+        rsi_overbought_thr = adjusted.get('rsi_overbought', 70)
+        if profit_pct > 0.05 and profit_pct > min_profit_pct and rsi > rsi_overbought_thr:
+            return f"RSI超买预警 (RSI={rsi:.1f}>阈值{rsi_overbought_thr:.0f})"
 
         # 5. MACD 死叉 + ADX 回落（放宽条件，强趋势反转也能退出）
-        strong_trend_threshold = adjusted['adx_threshold'] * 1.5
+        strong_trend_threshold = adjusted.get('adx_threshold', 25) * 1.5
         macd_dead = (macd_prev > macd_sig and macd < macd_sig)
         if macd_dead and profit_pct > min_profit_pct and adx < strong_trend_threshold:
             return f"MACD死叉+ADX回落 (ADX={adx:.1f}<{strong_trend_threshold:.1f})"
@@ -351,23 +361,29 @@ class AdvancedTradingBot:
         macd_golden = (macd_prev < macd_sig and macd > macd_sig)
         macd_above_zero = macd > -abs(macd_sig) * 0.5
         macd_dead = (macd_prev > macd_sig and macd < macd_sig)
-        quality_candle = candle_body_ratio > 0.30
+        # 阳线实体占比阈值（过滤十字星/弱信号K线）
+        min_body_ratio = 0.30
+        quality_candle = candle_body_ratio > min_body_ratio
+        # #12: 以下阈值改用 spec.get()，避免改配置不生效
+        adx_thr = adjusted.get('adx_threshold', 25)
+        rsi_oversold_thr = spec.get('rsi_oversold', 35)
+        range_bb_width_thr = spec.get('regime_range_bb_width', 0.02)
 
         if regime == 'TREND':
             # ── 趋势跟随信号 ──
-            if adx > adjusted['adx_threshold'] * 0.8:
+            if adx > adx_thr * 0.8:
                 # A1. MACD 金叉 + 量能 + 零轴过滤
                 if macd_golden and macd_above_zero and vol_ratio >= vol_thr and is_green_candle and quality_candle:
                     return "TREND_MACD_GOLDEN_CROSS", 'trend'
                 # A2. ADX + 量能确认
-                if (adx > adjusted['adx_threshold'] and
+                if (adx > adx_thr and
                         vol_ratio >= vol_thr and
                         price > sma20 and rsi > 50 and is_green_candle and quality_candle):
                     return "TREND_ADX_VOL_CONFIRM", 'trend'
 
             # B. RSI 上穿50 + 趋势过滤
             rsi_cross_50 = (rsi_prev < 50 <= rsi)
-            trend_ok = (price > sma60 or adx > adjusted['adx_threshold'])
+            trend_ok = (price > sma60 or adx > adx_thr)
             if rsi_cross_50 and trend_ok and price > bb_mid and vol_ratio >= vol_thr * 0.8:
                 return "TREND_RSI_50_CROSS", 'trend'
 
@@ -381,8 +397,8 @@ class AdvancedTradingBot:
             # C. 布林下轨支撑 + RSI 底背离
             touch_lower = price <= bb_lower * 1.005
             bb_width = (bb_upper - bb_lower) / price
-            bb_sufficient = bb_width > 0.02
-            rsi_bouncing = (rsi_3_ago is not None and rsi > rsi_prev > rsi_3_ago and rsi < 35)
+            bb_sufficient = bb_width > range_bb_width_thr
+            rsi_bouncing = (rsi_3_ago is not None and rsi > rsi_prev > rsi_3_ago and rsi < rsi_oversold_thr)
             if touch_lower and bb_sufficient and rsi_bouncing and vol_ratio >= vol_thr * 0.8:
                 return "MEANREV_BB_LOWER_RSI_DIVERGENCE", 'meanrev'
 
@@ -400,9 +416,15 @@ class AdvancedTradingBot:
         atr_multiplier = spec.get('atr_multiplier', 2.0)
         fallback_amount = spec.get('trade_amount', 20)
 
-        if atr <= 0:
+        # #19: atr<=0 不拦截 NaN（NaN<=0 为 False），NaN 会一路传到 min/max 让下单失败。
+        #      用 pd.isna 显式拦截。
+        if atr is None or pd.isna(atr) or atr <= 0:
             trade_amount = fallback_amount
         else:
+            # #29: 注意 risk_per_trade 名义上是"每笔风险占账户比例"，但下面算出的 trade_amount
+            #      = total*risk_per_trade / (atr_pct*multiplier)，在常见波动下远超 max_trade_amount，
+            #      实际几乎总是被截到 max_trade_amount。即真正生效的是 max_trade_amount（固定金额上限），
+            #      risk_per_trade 仅在极端高波动时才会成为约束。这是有意设计，非 bug。
             risk_amount = total_usdt * risk_per_trade
             trade_amount = risk_amount / (atr / price * atr_multiplier)
 
@@ -416,9 +438,9 @@ class AdvancedTradingBot:
     #  订单执行
     # ═══════════════════════════════════════════════════
 
-    def _execute_order(self, symbol, side, amount, price, mode):
+    def _execute_order(self, symbol, side, amount, price, mode, strategy_type='trend'):
         """
-        执行订单。
+        执行订单。原子化：余额变动 + 持仓写入/删除在同一把锁内一次 save（修复 #2/#27）。
         返回: (success, fill_price, fill_amount)
           - 模拟交易: fill_price=信号价, fill_amount=计算量
           - 实盘交易: fill_price/fill_amount 从订单响应中提取真实成交数据
@@ -426,38 +448,75 @@ class AdvancedTradingBot:
         FEE_RATE = 0.001
 
         if not config.LIVE_TRADE:
-            success, main_val, fee, trade_pnl = self.risk.execute_virtual_trade(symbol, side, amount, price, FEE_RATE)
-
+            # 模拟交易：直接调用原子化的 execute_*_update（余额 + 持仓一次落盘）
             if side == 'buy':
+                cost = amount * price
+                success, raw_cost, fee = self.risk.execute_buy_update(
+                    symbol, price, amount, cost, mode, strategy_type, FEE_RATE
+                )
                 if not success:
-                    logger.error(f"❌ 模拟购买失败：虚拟余额不足！(含手续费需: {main_val:.2f})")
+                    logger.error(f"❌ 模拟购买失败：虚拟余额不足！(含手续费需: {raw_cost:.2f})")
                     return False, None, None
-
-                logger.info(f"🧪 [模拟买入] 成交:{main_val:.2f} | 手续费:{fee:.2f} | 剩余余额:{self.risk.state['virtual_account']['balance']:.2f}")
+                logger.info(f"🧪 [模拟买入] 成交:{raw_cost:.2f} | 手续费:{fee:.2f} | 剩余余额:{self.risk.state['virtual_account']['balance']:.2f}")
+                return True, price, amount
 
             elif side == 'sell':
-                if not success:
+                pnl_pct = self.risk.execute_sell_update(symbol, price, mode, FEE_RATE)
+                if pnl_pct is None:
+                    logger.error(f"❌ 模拟卖出失败：无持仓 {symbol}")
                     return False, None, None
-                logger.info(f"🧪 [模拟卖出] 净收入:{main_val:.2f} | 单笔净盈亏:{trade_pnl:.2f}")
+                logger.info(f"🧪 [模拟卖出] pnl: {pnl_pct:.2f}% | 余额: {self.risk.state['virtual_account']['balance']:.2f}")
+                return True, price, amount
 
-            return True, price, amount
-
-        try:
-            if side == 'buy':
-                order = self.exchange.create_market_buy_order(symbol, amount)
-                fill_price = order.get('average') or order.get('price') or price
-                fill_amount = order.get('filled', amount)
-                logger.info(f"✅ [实盘买入] {symbol} 订单已执行: {order['id']} | 成交价:{fill_price} | 成交量:{fill_amount}")
-                return True, fill_price, fill_amount
-            elif side == 'sell':
-                order = self.exchange.create_market_sell_order(symbol, amount)
-                fill_price = order.get('average') or order.get('price') or price
-                fill_amount = order.get('filled', amount)
-                logger.info(f"✅ [实盘卖出] {symbol} 订单已执行: {order['id']} | 成交价:{fill_price} | 成交量:{fill_amount}")
-                return True, fill_price, fill_amount
-        except Exception as e:
-            logger.error(f"❌ [实盘{side}] 订单执行失败: {e}")
             return False, None, None
+
+        # 实盘交易：先调交易所 API（#6 精度规整 + #7 瞬时错误重试），成交后校验（#8）再原子化更新本地持仓
+        # 卖出是风控必卖，重试更激进；买入失败可跳过，只试 1 次
+        max_retries = 3 if side == 'sell' else 1
+        base_backoff = 2.0
+        order = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                # #6: 按交易所精度规整下单量，避免因精度不符被拒单
+                precise_amount = self.exchange.amount_to_precision(symbol, amount)
+                if side == 'buy':
+                    order = self.exchange.create_market_buy_order(symbol, precise_amount)
+                else:
+                    order = self.exchange.create_market_sell_order(symbol, precise_amount)
+                break
+            except (ccxt.NetworkError, ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
+                # #7: 网络/限频类瞬时错误，指数退避重试
+                if attempt < max_retries:
+                    wait = base_backoff ** attempt
+                    logger.warning(f"⚠️ [实盘{side}] 第{attempt}/{max_retries}次重试 ({type(e).__name__}): {e}，{wait}s 后重试")
+                    time.sleep(wait)
+                else:
+                    logger.error(f"❌ [实盘{side}] {symbol} 重试 {max_retries} 次仍失败: {e}")
+            except Exception as e:
+                # 非瞬时错误（余额不足/参数错误/签名失败等）不重试
+                logger.error(f"❌ [实盘{side}] {symbol} 订单执行失败（不重试）: {e}")
+                return False, None, None
+
+        if order is None:
+            return False, None, None
+
+        # #8: 校验成交信息——average/price/filled 任一为空都视为未成交，不回落到信号价
+        fill_price = order.get('average') or order.get('price')
+        fill_amount = order.get('filled')
+        if not fill_price or not fill_amount:
+            logger.error(f"❌ [实盘{side}] {symbol} 订单 {order.get('id')} 无成交信息（average/price/filled 为空），视为失败")
+            return False, None, None
+
+        logger.info(f"✅ [实盘{side}] {symbol} 订单已执行: {order.get('id')} | 成交价:{fill_price} | 成交量:{fill_amount}")
+        if side == 'buy':
+            actual_cost = fill_amount * fill_price
+            self.risk.execute_buy_update(
+                symbol, fill_price, fill_amount, actual_cost, mode, strategy_type
+            )
+            return True, fill_price, fill_amount
+        else:
+            self.risk.execute_sell_update(symbol, fill_price, mode)
+            return True, fill_price, fill_amount
 
     # ═══════════════════════════════════════════════════
     #  主循环
@@ -495,6 +554,7 @@ class AdvancedTradingBot:
                     if pos:
                         trailing_reason = self.risk.update_trailing_stop(symbol, price, df)
                         if trailing_reason:
+                            # _execute_order 内部已原子化完成"入账+历史+删仓位"，无需再调 execute_sell_update
                             success, fill_price, fill_amount = self._execute_order(
                                 symbol, 'sell', pos['amount'], price, trailing_reason)
                             if success:
@@ -502,7 +562,6 @@ class AdvancedTradingBot:
                                 pnl = (fill_price / pos['entry_price'] - 1) * 100
                                 send_notification(f"🆘 离场通知: {symbol}",
                                                   f"<b>原因</b>: {trailing_reason}\n<b>收益率</b>: {pnl:.2f}%")
-                                self.risk.execute_sell_update(symbol, fill_price, trailing_reason)
                             continue
 
                     # --- 第二步：策略信号判定 ---
@@ -536,17 +595,21 @@ class AdvancedTradingBot:
                             logger.info(f"⚠️ {symbol} 高级时间框架处于下跌趋势，抑制买入信号 {confirmed_mode}")
                             continue
 
+                        # #9: ATR 窗口用 spec.get('atr_period', 14)，与信号生成处保持一致
+                        spec_for_size = self.risk.get_effective_config(symbol)
                         atr = AverageTrueRange(df['high'], df['low'], df['close'],
-                                               window=14).average_true_range().iloc[-1]
+                                               window=spec_for_size.get('atr_period', 14)
+                                               ).average_true_range().iloc[-1]
                         amount, trade_amount = self._calc_position_size(symbol, price, atr, total_usdt)
 
                         htf_label = "↗上升" if htf_trend == 1 else "→震荡"
                         logger.info(f"📤 准备执行买入: {symbol}, 金额: {trade_amount:.2f}, 价格: {price:.2f}, 4h趋势: {htf_label}")
+                        # _execute_order 内部已原子化完成"扣款+写仓位"，无需再调 execute_buy_update
                         success, fill_price, fill_amount = self._execute_order(
-                            symbol, 'buy', amount, price, confirmed_mode)
+                            symbol, 'buy', amount, price, confirmed_mode,
+                            strategy_type=confirmed_strategy_type)
                         if success:
                             actual_cost = fill_amount * fill_price if config.LIVE_TRADE else trade_amount
-                            self.risk.execute_buy_update(symbol, fill_price, fill_amount, actual_cost, confirmed_mode, confirmed_strategy_type)
                             safe_mode = confirmed_mode.replace("_", " ")
                             strategy_label = "趋势跟踪" if confirmed_strategy_type == 'trend' else "均值回归"
                             send_notification(f"✅ 买入成交: {symbol}",
@@ -554,20 +617,25 @@ class AdvancedTradingBot:
                             # 买入后刷新可用余额，避免后续币种基于过期余额过度下单
                             if not config.LIVE_TRADE:
                                 total_usdt = self.risk.state['virtual_account']['balance']
+                            else:
+                                # #18: 实盘也需刷新——本地扣减已用资金（含手续费偏差可接受，
+                                #      下轮循环开头会重新 fetch_balance 拉准）
+                                total_usdt = max(total_usdt - actual_cost, 0)
 
                     # --- 第五步：执行策略卖出（熔断时仍执行） ---
                     elif signal == "SELL" and pos:
+                        # _execute_order 内部已原子化完成"入账+历史+删仓位"
                         success, fill_price, fill_amount = self._execute_order(
                             symbol, 'sell', pos['amount'], price, mode)
                         if success:
-                            pnl_pct = self.risk.execute_sell_update(symbol, fill_price, mode)
-                            pnl_display = f"{pnl_pct:.2f}%" if pnl_pct is not None else "N/A"
+                            pnl_pct = (fill_price / pos['entry_price'] - 1) * 100
                             send_notification(f"🔻 卖出成交: {symbol}",
-                                              f"<b>收益率</b>: {pnl_display}")
+                                              f"<b>收益率</b>: {pnl_pct:.2f}%")
 
                 time.sleep(240)  # 4h框架下每4分钟检查一次，减少不必要的API调用
             except Exception as e:
-                logger.error(f"运行异常: {e}")
+                # #30: 用 logger.exception 记录完整 traceback，便于定位
+                logger.exception(f"运行异常: {e}")
                 time.sleep(10)
 
 

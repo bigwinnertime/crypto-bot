@@ -3,5 +3,11 @@
 __pycache__/
 *.csv
 *.log
-*.json
-*.txt
+# #21: 改精确匹配，避免未来引入 package.json 等也被误忽略
+bot_state.json
+bot_state_template.json
+telegram_bot.lock
+daily_report.txt
+cron_debug.log
+
+.codebuddy/

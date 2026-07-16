@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -8,11 +9,32 @@ class ReportGenerator:
     def __init__(self, state_file='bot_state.json'):
         self.state_file = state_file
 
+    def _load_state_safe(self):
+        """
+        #5: 读 bot_state.json。RiskManager.save_state 已改为原子写入（os.replace），
+        读到的要么是旧文件要么是新文件，不会半截。这里再加一层 JSONDecodeError 重试防御：
+        极少数情况下 os.replace 与 open 撞在同一瞬间，重试一次即可读到完整新文件。
+        """
+        for attempt in range(3):
+            try:
+                with open(self.state_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except json.JSONDecodeError as e:
+                if attempt < 2:
+                    logger.warning(f"⚠️ 状态文件 JSON 解析失败（第{attempt+1}次），0.2s 后重试: {e}")
+                    time.sleep(0.2)
+                else:
+                    raise
+            except Exception as e:
+                raise
+        return None
+
     def get_performance_report(self):
         """生成完整的账户与历史分析报表"""
         try:
-            with open(self.state_file, 'r') as f:
-                state = json.load(f)
+            state = self._load_state_safe()
+            if state is None:
+                return
         except Exception as e:
             logger.error(f"❌ 读取状态文件失败: {e}")
             return
@@ -48,9 +70,11 @@ class ReportGenerator:
             print("   暂无持仓")
         else:
             for symbol, data in positions.items():
-                # 计算持仓期间最高涨幅
-                high_gain = (data['highest_price'] / data['entry_price'] - 1) * 100
-                print(f"🔹 {symbol}: 入场 {data['entry_price']:.2f} | 最高点涨幅 +{high_gain:.2f}%")
+                # #17: 用 .get() 避免 highest_price 缺字段时 KeyError
+                entry_price = data.get('entry_price', 0)
+                highest_price = data.get('highest_price', entry_price)
+                high_gain = (highest_price / entry_price - 1) * 100 if entry_price > 0 else 0
+                print(f"🔹 {symbol}: 入场 {entry_price:.2f} | 最高点涨幅 +{high_gain:.2f}%")
 
         # --- 3. 历史交易分析 ---
         print("\n📈 历史交易统计:")
@@ -63,15 +87,12 @@ class ReportGenerator:
                 # 计算盈亏金额（如果不存在pnl_amount字段）
                 pnl_amount = trade.get('pnl_amount', 0)
                 if pnl_amount == 0:
-                    # 使用固定的交易金额来计算盈亏（根据币种设定）
+                    # #16: 从 config 读取交易金额，而非硬编码 30/20/10
+                    import config
                     symbol = trade.get('symbol', '')
-                    if 'BTC' in symbol:
-                        trade_amount = 30  # BTC默认交易金额
-                    elif 'ETH' in symbol:
-                        trade_amount = 20  # ETH默认交易金额
-                    else:
-                        trade_amount = 10  # 其他币种默认交易金额
-                    
+                    sym_cfg = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
+                    trade_amount = sym_cfg.get('trade_amount', 10)
+
                     # 根据收益率计算盈亏金额
                     pnl_pct = trade.get('pnl_pct', 0)
                     pnl_amount = trade_amount * (pnl_pct / 100)

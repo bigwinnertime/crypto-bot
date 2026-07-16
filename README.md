@@ -47,64 +47,71 @@
 
 ## ✨ 核心特性
 
-### 🔄 双模式交易策略
+### 🔄 Regime 自适应双模式策略
 
-#### 1️⃣ 趋势跟踪模式 (ADX > 阈值)
-- **进场**: 价格突破均线，多头排列确认
-- **出场**: 价格跌破长期均线，趋势终结
-- **成交量确认**: 需成交量放大 1.5x-2.0x
+系统用 ADX + 布林带宽度识别市场状态（TREND/RANGE/NEUTRAL），按状态选择策略：
 
-#### 2️⃣ 震荡反转模式 (ADX ≤ 阈值)
-- **进场**: RSI 超卖反弹，逆向思维
-- **出场**: RSI 超买卖出，获利了结
-- **成交量确认**: 需成交量放大 1.2x-1.6x
+#### 1️⃣ 趋势态 (TREND) — 趋势跟随
+- **进场**: MACD 金叉 / ADX+量能 / RSI 上穿 50 / SMA20 突破（任一）
+- **出场**: ATR 追踪止损 + 主动止盈(N×ATR) + RSI 超买 + MACD 死叉
+- **成交量确认**: 需成交量放大 ≥ `volume_threshold` (默认 1.5x)
+
+#### 2️⃣ 震荡态 (RANGE) — 均值回归
+- **进场**: 布林下轨支撑 + RSI 底背离
+- **出场**: 布林中轨止盈 / RSI 回升 / 紧止损 / 超时退出（快进快出）
+- **成交量确认**: 需成交量放大 ≥ `volume_threshold × 0.8`
+
+#### 3️⃣ 中性态 (NEUTRAL) — 观望
+不进场，等待状态明确。
 
 ### 📊 技术指标体系
 
 | 指标 | 用途 | 说明 |
 |------|------|------|
-| **ADX** | 趋势强度识别 | 区分趋势/震荡市场 |
-| **RSI** | 超买超卖判断 | 震荡模式的核心信号 |
+| **ADX** | 趋势强度识别 | Regime 识别 + 趋势信号过滤 |
+| **RSI** | 超买超卖判断 | 趋势过滤 + 均值回归信号 |
 | **SMA20/60** | 均线系统 | 趋势方向和支撑阻力 |
 | **ATR** | 波动率测量 | 动态止损和参数调整 |
+| **MACD** | 动量指标 | 金叉/死叉信号 |
+| **Bollinger Bands** | 波动通道 | Regime 识别 + 均值回归信号 |
 | **Volume** | 成交量分析 | 信号确认和假突破过滤 |
 
 ### 🎯 分阶段追踪止盈
 
-创新的分离式追踪止盈策略，盈利门槛和回撤触发独立设置：
+创新的分离式追踪止盈策略，盈利门槛和回撤触发独立设置（以 BTC 为例）：
 
 ```
-阶段1: 盈利 2-3%  → 回撤 2%    触发卖出
-阶段2: 盈利 5-6%  → 回撤 2.5%  触发卖出
-阶段3: 盈利 10-12% → 回撤 3%   触发卖出
+阶段1: 盈利 5%   → 回撤 2.5%  触发卖出
+阶段2: 盈利 10%  → 回撤 3%    触发卖出
+阶段3: 盈利 18%  → 回撤 4%    触发卖出
 ```
 
-**时间衰减机制**: 持仓时间越长，追踪比例越小
+**时间衰减机制**: 持仓时间越长，追踪比例越小（4h 框架下延长观察期，48h 后才开始收紧）
 ```
-0-1小时   → 系数 1.0 (无衰减)
-1-4小时   → 系数 0.8 (20%衰减)
-4-12小时  → 系数 0.6 (40%衰减)
-12-24小时 → 系数 0.5 (50%衰减)
-24小时+   → 系数 0.4 (60%衰减)
+0-12小时   → 系数 1.0 (无衰减)
+12-24小时  → 系数 1.0 (无衰减)
+24-48小时  → 系数 0.9 (10%衰减)
+48-72小时  → 系数 0.75 (25%衰减)
+72小时+    → 系数 0.6 (40%衰减)
 ```
 
 ### 🛡️ 多层风险控制
 
 #### 1. ATR 动态止损
 ```python
-止损价 = 入场价 - ATR × 倍数
+止损价 = 最高价 - ATR × 倍数
 # BTC/ETH: ATR × 2.0
 # SOL: ATR × 2.5 (波动更大)
 ```
 
 #### 2. 固定百分比止损
 ```
-BTC: 3% | ETH: 5% | SOL: 5%
+BTC: 4% | ETH: 5% | SOL: 6%
 ```
 
-#### 3. 熔断保护机制
+#### 3. 熔断保护机制（按币种独立）
 - 检测异常暴跌（单根K线跌幅 > 8%）
-- 自动触发熔断，暂停交易 4 小时
+- 自动触发该币种熔断，暂停买入 2 小时
 - 防止黑天鹅事件造成重大损失
 
 #### 4. 仓位管理
@@ -135,11 +142,10 @@ BTC: 3% | ETH: 5% | SOL: 5%
 | `/fuse` | 手动熔断 | 紧急暂停交易 |
 | `/unfuse` | 解除熔断 | 恢复交易 |
 
-### 📧 多渠道通知
+### 💬 多渠道通知
 
-- **Telegram**: 实时交易通知
-- **邮件**: 重要事件提醒
-- **日志**: 完整运行记录
+- **Telegram**: 实时交易通知 + 远程控制
+- **日志**: 完整运行记录（`bot_main.log`）
 
 ---
 
@@ -147,39 +153,43 @@ BTC: 3% | ETH: 5% | SOL: 5%
 
 ```
 crypto-bot/
-├── bot_engine.py          # 核心交易引擎
-├── risk_manager.py        # 风险管理器
-├── config.py              # 配置文件
-├── remote_control.py      # Telegram远程控制
-├── telegram_notifier.py   # Telegram通知
-├── mail_notifier.py       # 邮件通知
-├── report_generator.py    # 每日报告生成
-├── state_manager.py       # 状态管理器
-├── bot_state.json         # 状态存储文件
-├── daily_report.sh        # 每日报告脚本
-└── test_*.py              # 测试脚本
+├── bot_engine.py                  # 核心交易引擎
+├── risk_manager.py                # 风险管理器（含状态持久化、追踪止盈、熔断）
+├── config.py                      # 配置文件（币种差异化参数、风控参数）
+├── remote_control.py             # Telegram 远程控制
+├── telegram_notifier.py          # Telegram 通知
+├── report_generator.py           # 每日报告生成
+├── send_telegram_report_daily.py # 每日报告 Telegram 推送
+├── bot_state.json                 # 状态存储文件（持仓/熔断/虚拟账户/历史）
+├── daily_report.sh               # 定时任务：生成并发送每日报告
+├── cleanup_bot.sh                # 清理锁文件与僵尸进程
+└── requirements.txt              # 依赖清单
 ```
 
 ### 核心模块说明
 
 #### `bot_engine.py` - 交易引擎
-- 数据获取和预处理
-- 策略信号生成
-- 订单执行拦截器
-- 主循环控制
+- 数据获取与多时间框架趋势过滤
+- Regime 自适应策略信号生成（趋势/均值回归）
+- 原子化订单执行（余额变动 + 持仓更新一次落盘）
+- 信号二次确认 + 主循环控制
 
-#### `risk_manager.py` - 风险管理
-- 追踪止盈逻辑
-- ATR动态止损
-- 熔断机制
-- 仓位管理
-- 状态持久化
+#### `risk_manager.py` - 风险管理 + 状态持久化
+- 分阶段追踪止盈 + 时间衰减
+- ATR 动态止损 / 固定止损 / 主动止盈
+- 按币种独立熔断 + 账户级回撤保护
+- 仓位暴露度 + 相关性分组检查
+- 原子化状态持久化（`save_state` 用临时文件 + `os.replace`）
 
 #### `config.py` - 配置中心
-- 币种差异化参数
-- 策略参数配置
-- 风控参数设置
-- API密钥管理
+- 币种差异化策略参数（BTC/ETH/SOL）
+- 风控参数（熔断/回撤/仓位/相关性）
+- 从 `.env` 读取 API 密钥与 Telegram 配置
+
+#### `remote_control.py` - Telegram 远程控制
+- `/status` `/positions` `/performance` `/trailing_status` 查询
+- `/set_sl` `/set_ts` `/config` 运行时调参
+- `/fuse` `/unfuse` 紧急熔断控制
 
 ---
 
@@ -229,17 +239,13 @@ cp .env.example .env  # 如果有模板文件
 
 编辑 `.env` 文件：
 ```bash
-# 交易所 API 配置
-API_KEY=your_api_key_here
-API_SECRET=your_api_secret_here
+# 交易所 API 配置（Binance）
+BINANCE_API_KEY=your_api_key_here
+BINANCE_SECRET_KEY=your_api_secret_here
 
 # Telegram Bot 配置
-TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
-
-# 邮件通知配置
-MAIL_USER=your_email@gmail.com
-MAIL_PASS=your_email_password
 ```
 
 #### 5. 选择交易模式
@@ -315,21 +321,25 @@ SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
 ```python
 STRATEGY_CONFIG = {
     'BTC/USDT': {
-        'adx_threshold': 30,           # ADX趋势强度阈值
-        'rsi_oversold': 40,            # RSI超卖阈值
-        'rsi_overbought': 75,          # RSI超买阈值
-        'trade_amount': 30,            # 单笔交易金额(USDT)
-        'stop_loss_pct': 0.03,         # 固定止损3%
-        
+        'adx_threshold': 22,           # 4h框架下 ADX 趋势强度阈值
+        'rsi_oversold': 35,
+        'rsi_overbought': 70,
+        'trade_amount': 30,            # 单笔交易金额 (USDT，fallback)
+        'stop_loss_pct': 0.04,         # 固定止损 4%
+
         # 成交量确认
         'volume_threshold': 1.5,       # 成交量放大阈值
-        'volume_ma_period': 20,        # 成交量均线周期
-        
-        # ATR动态止损
-        'atr_period': 14,              # ATR计算周期
-        'atr_multiplier': 2.0,         # ATR倍数
-        'use_atr_stop': True,          # 启用ATR止损
-        
+        'volume_ma_period': 20,
+
+        # ATR 动态止损
+        'atr_period': 14,
+        'atr_multiplier': 2.0,
+        'use_atr_stop': True,
+
+        # 布林带参数
+        'bb_period': 20,
+        'bb_std': 2,
+
         # 波动率适配
         'volatility_adjust': {
             'enabled': True,
@@ -338,25 +348,45 @@ STRATEGY_CONFIG = {
             'low_vol_multiplier': 0.8,
             'high_vol_multiplier': 1.2,
         },
-        
-        # 分阶段追踪止盈
+
+        # 分阶段追踪止盈（门槛提升，给利润更大运行空间）
         'trailing_stops': [
-            {'profit_threshold': 0.02, 'trigger_drawdown': 0.02},
-            {'profit_threshold': 0.05, 'trigger_drawdown': 0.025},
-            {'profit_threshold': 0.10, 'trigger_drawdown': 0.03},
+            {'profit_threshold': 0.05,  'trigger_drawdown': 0.025, 'trailing_pct': 0.02},
+            {'profit_threshold': 0.10,  'trigger_drawdown': 0.03,  'trailing_pct': 0.025},
+            {'profit_threshold': 0.18,  'trigger_drawdown': 0.04,  'trailing_pct': 0.035},
         ],
-        
-        # 时间衰减
+
+        # 仓位与止盈
+        'risk_per_trade': 0.01,        # 名义风险占比（实际受 max_trade_amount 截断）
+        'max_trade_amount': 100,       # 单笔金额上限（实际生效的约束）
+        'profit_target_atr': 6.0,      # 主动止盈目标 6×ATR
+        'min_profit_pct': 0.008,       # 最小盈利保护 0.8%
+
+        # 时间衰减（4h框架下延长观察期，48h 后才开始收紧）
         'time_decay': {
             'enabled': True,
             'intervals': [
-                {'hours': 1, 'multiplier': 1.0},
-                {'hours': 4, 'multiplier': 0.8},
-                {'hours': 12, 'multiplier': 0.6},
-                {'hours': 24, 'multiplier': 0.5},
-                {'hours': float('inf'), 'multiplier': 0.4},
+                {'hours': 12,  'multiplier': 1.0},
+                {'hours': 24,  'multiplier': 1.0},
+                {'hours': 48,  'multiplier': 0.9},
+                {'hours': 72,  'multiplier': 0.75},
+                {'hours': float('inf'), 'multiplier': 0.6},
             ]
-        }
+        },
+
+        # Regime 市场状态识别
+        'regime_trend_adx': 25,
+        'regime_range_adx': 20,
+        'regime_trend_bb_width': 0.03,
+        'regime_range_bb_width': 0.02,
+
+        # 均值回归策略退出参数（仅震荡态入场仓位使用）
+        'meanrev_config': {
+            'stop_loss_pct': 0.025,
+            'rsi_exit': 50,
+            'bb_mid_exit': True,
+            'max_hold_hours': 24,
+        },
     }
 }
 ```
@@ -364,62 +394,76 @@ STRATEGY_CONFIG = {
 ### 风险控制参数
 
 ```python
-# 熔断机制
-FUSE_LIMIT = 0.08          # 单根K线跌幅阈值 8%
-FUSE_DURATION = 14400      # 熔断持续时间 4小时(秒)
+# 熔断机制（按币种独立触发）
+DRAWDOWN_FUSE = 0.08        # 单根K线跌幅阈值 8%
+FUSE_DURATION = 7200        # 熔断持续时间 2 小时 (秒)
 
 # 仓位管理
-MAX_EXPOSURE = 0.3          # 最大仓位暴露度 30%
+MAX_TOTAL_EXPOSURE = 0.7    # 总仓位价值占账户总资产最大比例 70%
+
+# 账户级最大回撤保护
+MAX_DRAWDOWN_PCT = 0.15     # 账户净值从最高点回撤 15% 暂停所有交易
+DRAWDOWN_COOLDOWN = 14400   # 回撤冷却 4 小时 (秒)
+
+# 相关性分组（同组币种限制同时持仓数量）
+CORRELATION_GROUPS = {'L1': ['BTC/USDT', 'ETH/USDT']}
+MAX_CORRELATED_POSITIONS = 1
 ```
 
 ---
 
 ## 📚 策略详解
 
-### 进场逻辑
+### 进场逻辑（Regime 自适应）
 
-#### 趋势模式进场
+系统先用 ADX + 布林带宽度识别市场状态（TREND / RANGE / NEUTRAL），再按状态选择策略：
+
+#### 趋势态 (TREND) 进场 — 趋势跟随
 ```
-条件1: ADX > 阈值 (趋势强度足够)
-条件2: 价格 > SMA20 且 SMA20 > SMA60 (均线多头排列)
-条件3: 成交量 > 均值 × 1.5 (成交量放大)
-→ 触发买入信号
+A1. MACD 金叉 + 零轴过滤 + 量能 + 阳线质量
+A2. ADX > 阈值 + 量能 + 价格>SMA20 + RSI>50 + 阳线质量
+B.  RSI 上穿 50 + 趋势过滤(价格>SMA60 或 ADX>阈值) + 价格>布林中轨
+D.  SMA20 突破 + RSI>55 + 量能 + 阳线质量
+→ 任一满足即触发 BUY（策略类型 trend）
 ```
 
-#### 震荡模式进场
+#### 震荡态 (RANGE) 进场 — 均值回归
 ```
-条件1: ADX ≤ 阈值 (震荡市场)
-条件2: RSI < 超卖阈值 (底部区域)
-条件3: 成交量 > 均值 × 1.2 (成交量确认)
-→ 触发买入信号
+C. 价格触及布林下轨 + 布林带宽度充足 + RSI 底背离(连续回升) + 量能
+→ 触发 BUY（策略类型 meanrev）
 ```
+
+#### 中性态 (NEUTRAL)
+观望，不进场。
+
+> 信号需连续 2 轮触发同方向才执行（二次确认，过滤假突破）。
+> 多时间框架过滤：高级时间框架(1d)下跌时抑制买入。
 
 ### 出场逻辑
 
-#### 策略出场
-- **趋势终结**: 价格跌破 SMA60
-- **震荡卖出**: RSI > 超买阈值
+#### 趋势仓位出场（让利润奔跑）
+- **ATR 追踪止损**：价格 ≤ 最高价 − ATR×倍数
+- **固定止损**：亏损达到 `stop_loss_pct`
+- **主动止盈**：盈利达到 `profit_target_atr`×ATR
+- **RSI 超买**：盈利>5% 且 RSI>超买阈值
+- **MACD 死叉+ADX 回落**
+- **分阶段追踪止盈**：见上文
 
-#### 风控出场
-- **追踪止盈**: 达到盈利门槛后，回撤触发卖出
-- **ATR止损**: 价格跌破动态止损线
-- **固定止损**: 亏损达到设定百分比
+#### 均值回归仓位出场（快进快出）
+- **紧止损**：`meanrev_config.stop_loss_pct`
+- **布林中轨止盈**
+- **RSI 回升退出**（RSI≥50 且盈利）
+- **超时强制退出**：`max_hold_hours`
 
 ### 成交量确认机制
 
-成交量是验证信号有效性的关键：
+成交量是验证信号有效性的关键（阈值由 `volume_threshold` 配置，BTC=1.5、SOL=1.8）：
 
 ```python
-# 趋势买入: 需要更强的成交量确认
 volume_ratio = current_volume / volume_ma
-if volume_ratio >= 1.5:
-    允许买入
-else:
-    拒绝买入 (防止假突破)
 
-# 震荡买入: 成交量要求稍低
-if volume_ratio >= 1.2:
-    允许买入
+# 趋势 A1/A2/D 信号: 要求 vol_ratio >= volume_threshold (如 1.5)
+# 趋势 B / 震荡 C 信号: 放宽到 vol_ratio >= volume_threshold * 0.8 (如 1.2)
 ```
 
 ### 波动率自适应详解
@@ -455,22 +499,22 @@ if volume_ratio >= 1.2:
 
 ### 追踪止盈示例
 
-**ETH 交易示例**:
+**ETH 交易示例**（对应当前 `STRATEGY_CONFIG['ETH/USDT']`）:
 ```
 入场价: $2000
 价格上涨到 $2240 (12%盈利)
 
-阶段3激活: 追踪阈值 3%
-持仓6小时: 时间衰减系数 0.6
-调整后阈值: 3% × 0.6 = 1.8%
+阶段2激活: trigger_drawdown = 3.5%
+持仓 6 小时: 时间衰减系数 1.0 (0-12h 内无衰减)
+调整后阈值: 3.5% / 1.0 = 3.5%
 
 价格回撤到 $2200:
 回撤幅度: (2240-2200)/2240 = 1.79%
-未触发止盈 (1.79% < 1.8%)
+未触发止盈 (1.79% < 3.5%)
 
-价格继续下跌到 $2195:
-回撤幅度: 2%
-触发追踪止盈，卖出获利 9.75%
+价格继续下跌到 $2161:
+回撤幅度: (2240-2161)/2240 = 3.53%
+触发追踪止盈，卖出获利 8.05%
 ```
 
 ### 仓位控制
@@ -503,10 +547,11 @@ if total_cost / total_balance > 0.3:
    - 找到 `chat.id` 字段
 
 3. **配置到系统**
-```python
-# config.py
-TELEGRAM_BOT_TOKEN = '123456789:ABCdefGHIjklMNOpqrsTUVwxyz'
-TELEGRAM_CHAT_ID = '123456789'
+
+在 `.env` 中设置（`config.py` 会自动读取）：
+```bash
+TELEGRAM_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+TELEGRAM_CHAT_ID=123456789
 ```
 
 ### 常用命令示例
