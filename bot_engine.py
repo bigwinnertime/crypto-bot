@@ -588,17 +588,18 @@ class AdvancedTradingBot:
                     confirmed_mode = None
                     confirmed_strategy_type = None
                     confirmed_score = 0
+                    sentiment_blocked = False
                     if signal == "BUY" and not is_fused:
                         # 市场情绪过滤
                         if self._sentiment_scale:
                             if self._sentiment_scale.get('block_trend') and strategy_type == 'trend':
                                 logger.info(f"😰 {symbol} 极度恐惧，禁止趋势跟踪入场: {mode}")
-                                signal = "HOLD"  # 降级为HOLD
+                                sentiment_blocked = True
                             elif self._sentiment_scale.get('block_meanrev') and strategy_type == 'meanrev':
                                 logger.info(f"🤑 {symbol} 极度贪婪，禁止均值回归入场: {mode}")
-                                signal = "HOLD"
+                                sentiment_blocked = True
 
-                    if signal == "BUY" and not is_fused:
+                    if signal == "BUY" and not is_fused and not sentiment_blocked:
                         prev = self.pending_signals.get(symbol, {})
                         # 均值回归信号条件严格（RSI超卖+阳线+量能），直接入场；趋势信号需连续2轮确认
                         if strategy_type == 'meanrev' or prev.get('signal') == 'BUY':
@@ -613,8 +614,9 @@ class AdvancedTradingBot:
                             # 第1轮，记录信号，等待下一轮确认
                             self.pending_signals[symbol] = {'signal': 'BUY', 'mode': mode, 'strategy_type': strategy_type, 'score': signal_score}
                             logger.debug(f"⏳ {symbol} 等待信号二次确认: {mode} (第1/2轮, 评分: {signal_score})")
-                    else:
+                    elif not sentiment_blocked:
                         # 非BUY信号或熔断状态，清除待确认状态
+                        # 注意：情绪过滤导致的不入场不清除 pending（情绪恢复后可直接确认）
                         if symbol in self.pending_signals:
                             self.pending_signals.pop(symbol, None)
 
@@ -669,6 +671,11 @@ class AdvancedTradingBot:
                                 final_scale *= self._sentiment_scale.get('trend_scale', 1.0)
                             else:
                                 final_scale *= self._sentiment_scale.get('meanrev_scale', 1.0)
+
+                        # 仓位缩放下限：低于 15% 则放弃入场（避免无意义的最小单）
+                        if final_scale < 0.15:
+                            logger.info(f"⚠️ {symbol} 仓位缩放 {final_scale:.0%} 低于下限 15%，放弃入场")
+                            continue
 
                         trade_amount = trade_amount * final_scale
                         amount = trade_amount / price

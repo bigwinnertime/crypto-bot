@@ -238,7 +238,7 @@ def should_buy(price, adx, rsi, rsi_prev,
             return "TREND_SMA20_BREAKOUT", 'trend', score
 
     if regime in ('RANGE', 'NEUTRAL'):
-        touch_lower = price <= bb_lower * 1.01
+        touch_lower = bb_lower * 0.97 <= price <= bb_lower * 1.01  # 触下轨：下界97%~上界101%
         bb_width = (bb_upper - bb_lower) / price
         bb_sufficient = bb_width > range_bb_width_thr
         rsi_bouncing = (rsi > rsi_prev and rsi < rsi_oversold_thr)
@@ -329,6 +329,17 @@ def should_sell(price, entry_price, highest_price, strategy_type, holding_hours,
     elif profit_in_atr > 3.0:
         atr_multi = atr_multi * 1.25
 
+    # 保本止损优先检查（在 ATR 追踪止损之前）
+    # 原因：保本止损是"盈利后回撤至成本"的兜底机制，
+    # 如果 ATR 追踪止损线高于保本线，应优先返回保本止损（更精确的分类）
+    breakeven_trigger = spec.get('breakeven_trigger', 0.02)
+    breakeven_buffer = spec.get('breakeven_buffer', 0.003)
+    if profit_pct >= breakeven_trigger:
+        breakeven_stop = entry_price * (1 + breakeven_buffer)
+        if price <= breakeven_stop:
+            return "保本止损"
+
+    # ATR 追踪止损
     if atr > 0:
         trail_stop = highest_price - atr_multi * atr
         if price <= trail_stop:
@@ -337,14 +348,6 @@ def should_sell(price, entry_price, highest_price, strategy_type, holding_hours,
     hard_stop = entry_price * (1 - spec.get('stop_loss_pct', 0.04))
     if price <= hard_stop:
         return "固定止损"
-
-    # 保本止损
-    breakeven_trigger = spec.get('breakeven_trigger', 0.02)
-    breakeven_buffer = spec.get('breakeven_buffer', 0.003)
-    if profit_pct >= breakeven_trigger:
-        breakeven_stop = entry_price * (1 + breakeven_buffer)
-        if price <= breakeven_stop:
-            return "保本止损"
 
     profit_target = spec.get('profit_target_atr', 6.0)
     if profit_in_atr >= profit_target:
