@@ -158,6 +158,9 @@ crypto-bot/
 ├── config.py                      # 配置文件（币种差异化参数、风控参数）
 ├── backtest.py                    # 回测框架（backtrader 适配版）
 ├── backtest_native.py             # 回测框架（原生版，直接复用 bot_engine 信号）
+├── sentiment.py                   # 市场情绪集成（Fear & Greed Index）
+├── anomaly_detector.py            # 异常检测与预警
+├── dashboard.py                   # Web 管理界面（Streamlit）
 ├── remote_control.py             # Telegram 远程控制
 ├── telegram_notifier.py          # Telegram 通知
 ├── report_generator.py           # 每日报告生成
@@ -276,6 +279,8 @@ python bot_engine.py
 | **pyTelegramBotAPI** | >=4.10.0 | Telegram机器人API，远程控制接口 |
 | **backtrader** | >=1.9.78 | backtrader版回测框架（`backtest.py` 依赖） |
 | **matplotlib** | >=3.7.0 | backtrader版回测结果可视化 |
+| **streamlit** | >=1.30.0 | Web管理界面（`dashboard.py` 依赖） |
+| **requests** | >=2.31.0 | 市场情绪API调用（`sentiment.py` 依赖） |
 
 > 💡 **提示**：`backtest_native.py`（原生版回测器）无需额外依赖，仅使用 ccxt/ta/pandas。
 
@@ -783,86 +788,48 @@ elif regime == 'RANGE':
 2. 通过回测验证新策略的独立表现
 3. 与现有策略组合，信号冲突时按评分优先级选择
 
-### 🎯 长期规划 (6-12个月)
+### 🎯 长期规划 (已实施)
 
-#### 1. Web 管理界面
+| 功能 | 实现位置 | 说明 |
+|------|---------|------|
+| **Web 管理界面** | `dashboard.py` | Streamlit 仪表盘：实时持仓/账户/风控状态、历史交易分析、策略配置展示 |
+| **市场情绪集成** | `sentiment.py` | Crypto Fear & Greed Index，极度恐惧禁止趋势入场、极度贪婪禁止均值回归 |
+| **异常检测与预警** | `anomaly_detector.py` | 波动率异常/量价背离/跨币种系统性风险检测，自动 Telegram 预警 + 全局熔断 |
 
-> 最务实的长期规划，已有 Telegram 远程控制基础，Web 版是自然延伸。
+#### Web 管理界面
 
-**技术选型：** Streamlit（快速搭建，1-2周可出原型）
+**启动：**
+```bash
+streamlit run dashboard.py
+# 或指定端口
+streamlit run dashboard.py --server.port 8501
+```
 
 **功能模块：**
+- 📊 实时仪表盘：账户净值、当前持仓、熔断/回撤状态
+- 📈 历史分析：交易明细、盈亏分布图、退出原因统计、胜率/盈亏比
+- ⚙️ 策略配置：各币种参数展示、全局风控参数
+
+#### 市场情绪集成
+
+**数据源：** [Crypto Fear & Greed Index](https://api.alternative.me/fng/)（免费，每小时缓存）
+
+**策略调整规则：**
 ```
-📊 实时仪表盘
-├── 账户净值 + 收益曲线
-├── 当前持仓 + 浮动盈亏
-├── Regime 状态实时展示
-└── 熔断/回撤状态
-
-⚙️ 策略管理
-├── 参数在线调整（config.py 远程化）
-├── 策略开关（启用/禁用某币种或信号）
-└── 回测触发 + 结果展示
-
-📈 历史分析
-├── 交易明细 + 盈亏分布
-├── 退出原因统计
-└── 月度/周度报告
+极度恐惧 (<20)：禁止趋势跟踪入场，均值回归仓位减半
+极度贪婪 (>80)：禁止均值回归入场，趋势仓位缩至80%
+正常区间 (20-80)：不影响策略
 ```
 
-**实施步骤：**
-1. 用 Streamlit 搭建基础框架，读取 `bot_state.json`
-2. 实现实时仪表盘（自动刷新）
-3. 接入参数调整功能（写入 runtime_config）
-4. 集成回测触发（调用 `backtest_native.py`）
+#### 异常检测与预警
 
-#### 2. 市场情绪集成
+**三层检测：**
+1. **波动率异常** — ATR > 30日均值的2.5倍
+2. **量价背离** — 量比>3倍但价格变动<1%
+3. **跨币种系统性风险** — 多币种同时大跌>5%
 
-> 简化版"极端行情应对"。不接入付费新闻API和NLP模型，而是用免费的恐惧贪婪指数。
+异常时自动发送 Telegram 预警，系统性风险时触发全局熔断。
 
-**数据源：**
-- [Crypto Fear & Greed Index](https://api.alternative.me/fng/) — 免费，每日更新
-- 计算 0-100 情绪分数（0=极度恐惧，100=极度贪婪）
-
-**应用场景：**
-```python
-# 情绪极端时调整策略
-if fear_greed < 20:    # 极度恐惧
-    # 禁止趋势跟踪入场（可能继续下跌）
-    # 均值回归信号仓位减半（接飞刀风险）
-elif fear_greed > 80:  # 极度贪婪
-    # 趋势仓位收紧止盈（可能见顶）
-    # 禁止均值回归入场（可能不回归）
-```
-
-**实施步骤：**
-1. 新增 `sentiment.py` 模块，每日拉取恐惧贪婪指数
-2. 在 `get_strategy_signal` 中加入情绪过滤
-3. 回测验证情绪过滤的效果（历史数据可获取）
-
-#### 3. 异常检测与预警
-
-> 简化版"黑天鹅检测"。不依赖链上数据和新闻NLP，基于价格行为检测异常。
-
-**检测维度：**
-```python
-# 1. 波动率异常：ATR 突然放大到历史均值的 N 倍
-if current_atr > avg_atr_30d * 2.5:
-    trigger_warning("波动率异常飙升")
-
-# 2. 成交量异常：成交量放大到均值的 N 倍但价格不动
-if vol_ratio > 3.0 and abs(price_change) < 0.01:
-    trigger_warning("量价背离异常")
-
-# 3. 跨币种相关性异常：BTC/ETH/SOL 同时异动
-if all_three_drop > 0.05 in 4h:
-    trigger_warning("系统性风险预警")
-```
-
-**实施步骤：**
-1. 在主循环中加入异常检测逻辑
-2. 异常时发送 Telegram 预警
-3. 严重异常时自动触发全局熔断
 
 ---
 

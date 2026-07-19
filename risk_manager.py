@@ -97,16 +97,18 @@ class RiskManager:
 
     def check_circuit_breaker(self, symbol, df):
         """熔断机制：按币种独立触发，防止在暴跌中持续接飞刀。
-
-        两层检测：
-        1. 单根K线暴跌（DRAWDOWN_FUSE，防闪崩）
-        2. 多根K线累计跌幅（DRAWDOWN_FUSE_MULTI_BAR，防阴跌）
+        线程安全：所有 state 读写都在 _file_lock 内完成。
         """
         if len(df) < 2:
             return False
 
         import config
 
+        with self._file_lock:
+            return self._check_circuit_breaker_unlocked(symbol, df, config)
+
+    def _check_circuit_breaker_unlocked(self, symbol, df, config):
+        """熔断检测内部实现（调用方已持有锁）。"""
         # 全局熔断（Telegram /fuse 命令）
         if self.state.get('is_fused', False):
             fuse_duration = getattr(config, 'FUSE_DURATION', 28800)
@@ -163,20 +165,21 @@ class RiskManager:
         return False
 
     def is_symbol_fused(self, symbol):
-        """检查某个币种是否处于熔断状态（供 bot_engine 快速查询）"""
-        # 全局熔断
-        if self.state.get('is_fused', False):
-            return True
-        # 按币种熔断
-        fused_symbols = self.state.get('fused_symbols', {})
-        if symbol in fused_symbols:
-            import config
-            fuse_duration = getattr(config, 'FUSE_DURATION', 28800)
-            elapsed = time.time() - fused_symbols[symbol]
-            if elapsed > fuse_duration:
-                return False  # 已过期
-            return True
-        return False
+        """检查某个币种是否处于熔断状态（供 bot_engine 快速查询）。线程安全。"""
+        with self._file_lock:
+            # 全局熔断
+            if self.state.get('is_fused', False):
+                return True
+            # 按币种熔断
+            fused_symbols = self.state.get('fused_symbols', {})
+            if symbol in fused_symbols:
+                import config
+                fuse_duration = getattr(config, 'FUSE_DURATION', 28800)
+                elapsed = time.time() - fused_symbols[symbol]
+                if elapsed > fuse_duration:
+                    return False  # 已过期
+                return True
+            return False
 
     def remote_set_fuse(self, status: bool):
         """供 Telegram 线程安全设置全局熔断"""
@@ -192,6 +195,11 @@ class RiskManager:
                     if symbol not in self.state['fused_symbols']:
                         self.state['fused_symbols'][symbol] = time.time()
             self.save_state()
+
+    def trigger_global_fuse(self, reason=""):
+        """触发全局熔断（异常检测调用）"""
+        logger.error(f"🚨 触发全局熔断: {reason}")
+        self.remote_set_fuse(True)
 
     # ═══════════════════════════════════════════════════
     #  仓位管理
