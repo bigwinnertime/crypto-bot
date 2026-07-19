@@ -6,10 +6,16 @@ from datetime import datetime
 logger = logging.getLogger("TradingBot.DailyReport")
 
 def send_daily_msg():
-    report_path = 'daily_report.txt'
+    # 使用脚本所在目录构建绝对路径，不依赖工作目录
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    report_path = os.path.join(script_dir, 'daily_report.txt')
 
     if not os.path.exists(report_path):
-        logger.error("❌ 报告文件不存在，停止发送。")
+        logger.error(f"❌ 报告文件不存在: {report_path}")
+        return
+
+    if not os.path.getsize(report_path) > 0:
+        logger.error("❌ 报告文件为空，跳过发送")
         return
 
     with open(report_path, 'r', encoding='utf-8') as f:

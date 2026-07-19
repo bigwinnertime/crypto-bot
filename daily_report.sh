@@ -1,27 +1,27 @@
 #!/bin/bash
-# 1. 设置项目根目录的绝对路径（请根据实际情况修改）
+# daily_report.sh — 生成并发送每日报告
+# 使用 set -euo pipefail 确保任一步骤失败立即停止，不会发送错误报告
+
+set -euo pipefail
+
+# 项目目录和 Python 路径（请根据实际部署修改）
 PROJECT_DIR="/root/project/crypto-bot"
-# 2. 设置 Conda 环境中 Python 的绝对路径
 PYTHON_EXEC="/root/miniconda3/envs/crypto-bot/bin/python"
 
-# 1. 进入程序所在目录（请修改为你的实际绝对路径）
-cd ${PROJECT_DIR}
+# 进入项目目录
+cd "${PROJECT_DIR}"
 
-# 2. 激活虚拟环境 (如果你使用了虚拟环境，请取消下面这行的注释)
-#source venv/bin/activate
-
-# 3. 生成报告
-# 运行 report_generator.py 并将输出重定向到文件
+# 1. 生成报告（失败则立即退出，不发送空报告）
 ${PYTHON_EXEC} report_generator.py > daily_report.txt
 
-# 4. 调用 Python 发送telegram
+# 2. 检查报告文件是否非空
+if [ ! -s daily_report.txt ]; then
+    echo "$(date): 报告文件为空，跳过发送" >> cron_debug.log
+    exit 1
+fi
+
+# 3. 发送 Telegram 报告
 ${PYTHON_EXEC} send_telegram_report_daily.py
 
-# 5. (可选) 清理日志或备份报告
-# cp daily_report.txt ./history/report_$(date +%Y%m%d).txt
-# 检查执行结果
-if [ $? -eq 0 ]; then
-    echo "$(date): 报告发送成功" >> cron_debug.log
-else
-    echo "$(date): 报告发送失败" >> cron_debug.log
-fi
+# 4. 记录成功日志
+echo "$(date): 报告发送成功" >> cron_debug.log

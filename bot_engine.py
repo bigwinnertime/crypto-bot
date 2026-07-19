@@ -90,6 +90,15 @@ class AdvancedTradingBot:
         # HTF 数据缓存（减少 API 调用）
         self._htf_cache = {}
 
+        # PID 文件管理（供 cleanup_bot.sh 精确清理）
+        self._pid_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot_engine.pid')
+        try:
+            with open(self._pid_file, 'w') as f:
+                f.write(str(os.getpid()))
+            logger.info(f"PID 文件已创建: {self._pid_file} (PID: {os.getpid()})")
+        except Exception as e:
+            logger.warning(f"创建 PID 文件失败: {e}")
+
         init_remote_control(self.risk)
         self.cmd_thread = threading.Thread(target=start_remote_listener, daemon=True)
         self.cmd_thread.start()
@@ -766,4 +775,16 @@ class AdvancedTradingBot:
 
 
 if __name__ == "__main__":
-    AdvancedTradingBot().run()
+    bot = AdvancedTradingBot()
+    try:
+        bot.run()
+    except KeyboardInterrupt:
+        logger.info("👋 用户中断，正在退出...")
+    finally:
+        # 清理 PID 文件
+        if hasattr(bot, '_pid_file') and os.path.exists(bot._pid_file):
+            try:
+                os.remove(bot._pid_file)
+                logger.info("PID 文件已清理")
+            except Exception:
+                pass

@@ -536,7 +536,15 @@ class RiskManager:
                 # 实盘无手续费追踪，pnl_amount 用毛值（entry→sell 价差 × 量）
                 pnl_val = (price - pos['entry_price']) * pos['amount']
 
-            pnl_pct = (price / pos['entry_price'] - 1) * 100
+            # pnl_pct：模拟交易用净收益率（扣双边手续费），实盘用毛收益率
+            if not config.LIVE_TRADE:
+                entry_fee = pos['entry_price'] * pos['amount'] * fee_rate
+                sell_fee = price * pos['amount'] * fee_rate
+                net_pnl = (price - pos['entry_price']) * pos['amount'] - entry_fee - sell_fee
+                net_cost = pos['entry_price'] * pos['amount'] + entry_fee
+                pnl_pct = (net_pnl / net_cost) * 100 if net_cost > 0 else 0
+            else:
+                pnl_pct = (price / pos['entry_price'] - 1) * 100
 
             trade_record = {
                 "symbol": symbol,
