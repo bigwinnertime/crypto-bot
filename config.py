@@ -62,6 +62,7 @@ STRATEGY_CONFIG = {
         'min_profit_pct': 0.008,      # 最小盈利保护：盈利低于0.8%时不主动卖出
         'breakeven_trigger': 0.02,    # 保本止损：盈利超2%后止损上移至成本价
         'breakeven_buffer': 0.003,   # 保本线上方留0.3%缓冲
+        'min_signal_score': 40,      # 信号最低评分阈值（低于此值放弃入场）
 
         # 时间衰减：4h框架下延长观察期，96h后才开始收紧（72h仅18根K线，对趋势跟踪过早）
         'time_decay': {
@@ -282,6 +283,7 @@ DEFAULT_CONFIG = {
     'min_profit_pct': 0.008,        # 最小盈利保护（默认0.8%）
     'breakeven_trigger': 0.02,      # 保本止损：盈利超2%后止损上移至成本价
     'breakeven_buffer': 0.003,     # 保本线上方留0.3%缓冲
+    'min_signal_score': 40,        # 信号最低评分阈值
 
     # 时间衰减配置（4h框架下延长观察期，96h后才开始收紧）
     'time_decay': {

@@ -175,16 +175,85 @@ def adjust_params_by_volatility(spec, atr_pct):
     return adjusted
 
 
+def calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price,
+                      sma20, sma60, bb_mid, adx_thr, trend_dir=1, bb_lower=None, bb_upper=None):
+    """信号强度评分（与 bot_engine._calc_signal_score 一致）。5维度各20分，总分100。"""
+    score = 0
+    # 1. 趋势强度
+    if adx >= adx_thr * 1.5: score += 20
+    elif adx >= adx_thr: score += 15
+    elif adx >= adx_thr * 0.8: score += 10
+    else: score += 5
+    # 2. 量能
+    if vol_ratio >= 2.0: score += 20
+    elif vol_ratio >= 1.5: score += 15
+    elif vol_ratio >= 1.2: score += 10
+    else: score += 5
+    # 3. 动量
+    macd_hist = macd - macd_sig
+    if trend_dir == 1:
+        if macd_hist > 0 and macd > macd_sig: score += 20
+        elif macd_hist > 0: score += 12
+        else: score += 5
+    else:
+        if rsi < 25: score += 20
+        elif rsi < 30: score += 15
+        elif rsi < 35: score += 10
+        else: score += 5
+    # 4. 价格位置
+    if trend_dir == 1:
+        if price > sma20 > sma60: score += 20
+        elif price > sma20: score += 12
+        elif price > sma60: score += 8
+        else: score += 3
+    else:
+        if bb_lower is not None and bb_upper is not None:
+            bb_pos = (price - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
+            if bb_pos < 0.1: score += 20
+            elif bb_pos < 0.2: score += 15
+            elif bb_pos < 0.3: score += 10
+            else: score += 5
+        else:
+            score += 10
+    # 5. 趋势方向
+    if trend_dir == 1:
+        if sma20 > sma60: score += 20
+        else: score += 8
+    else:
+        if price < bb_mid: score += 15
+        else: score += 8
+    return min(score, 100)
+
+
+def score_to_position_scale(score, spec):
+    """评分映射仓位（与 bot_engine._score_to_position_scale 一致）。"""
+    min_score = spec.get('min_signal_score', 40)
+    if score < min_score: return 0.0
+    if score >= 80: return 1.0
+    if score >= 60: return 0.8
+    if score >= min_score: return 0.6
+    return 0.0
+
+
+def get_regime_position_scale(regime, strategy_type):
+    """动态资金分配（与 bot_engine._get_regime_position_scale 一致）。"""
+    if regime == 'TREND':
+        return 1.2 if strategy_type == 'trend' else 0.6
+    elif regime == 'RANGE':
+        return 1.2 if strategy_type == 'meanrev' else 0.6
+    else:  # NEUTRAL
+        return 1.0 if strategy_type == 'meanrev' else 0.7
+
+
 def should_buy(row, prev_row, row_3_ago, spec, adjusted, regime):
     """
-    买入信号判定（与 bot_engine._should_buy 一致）。
-    row: 当前K线指标行, prev_row: 前一根, row_3_ago: 前3根
+    买入信号判定 + 评分（与 bot_engine._should_buy 一致）。
+    返回: (buy_reason, strategy_type, signal_score) 或 (None, None, 0)
     """
     price = row['close']
     adx = row['adx']
     rsi = row['rsi']
     rsi_prev = prev_row['rsi']
-    rsi_3_ago = row_3_ago['rsi'] if row_3_ago is not None else None
     sma20 = row['sma20']
     sma60 = row['sma60']
     macd = row['macd']
@@ -213,19 +282,23 @@ def should_buy(row, prev_row, row_3_ago, spec, adjusted, regime):
     if regime == 'TREND':
         if adx > adx_thr * 0.8:
             if macd_golden and macd_above_zero and vol_ratio >= vol_thr and is_green_candle and quality_candle:
-                return "TREND_MACD_GOLDEN_CROSS", 'trend'
+                s = calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price, sma20, sma60, bb_mid, adx_thr, 1)
+                return "TREND_MACD_GOLDEN_CROSS", 'trend', s
             if (adx > adx_thr and vol_ratio >= vol_thr and
                     price > sma20 and rsi > 50 and is_green_candle and quality_candle):
-                return "TREND_ADX_VOL_CONFIRM", 'trend'
+                s = calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price, sma20, sma60, bb_mid, adx_thr, 1)
+                return "TREND_ADX_VOL_CONFIRM", 'trend', s
 
         rsi_cross_50 = (rsi_prev < 50 <= rsi)
         trend_ok = (price > sma60 or adx > adx_thr)
         if rsi_cross_50 and trend_ok and price > bb_mid and vol_ratio >= vol_thr * 0.8:
-            return "TREND_RSI_50_CROSS", 'trend'
+            s = calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price, sma20, sma60, bb_mid, adx_thr, 1)
+            return "TREND_RSI_50_CROSS", 'trend', s
 
         if (price > sma20 and rsi > 50 and
                 vol_ratio >= vol_thr and not macd_dead and is_green_candle and quality_candle):
-            return "TREND_SMA20_BREAKOUT", 'trend'
+            s = calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price, sma20, sma60, bb_mid, adx_thr, 1)
+            return "TREND_SMA20_BREAKOUT", 'trend', s
 
     if regime in ('RANGE', 'NEUTRAL'):
         touch_lower = price <= bb_lower * 1.01
@@ -233,7 +306,8 @@ def should_buy(row, prev_row, row_3_ago, spec, adjusted, regime):
         bb_sufficient = bb_width > range_bb_width_thr
         rsi_bouncing = (rsi > rsi_prev and rsi < rsi_oversold_thr)
         if touch_lower and bb_sufficient and rsi_bouncing and vol_ratio >= vol_thr * 0.8:
-            return "MEANREV_BB_LOWER_RSI_DIVERGENCE", 'meanrev'
+            s = calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price, sma20, sma60, bb_mid, adx_thr, 0, bb_lower, bb_upper)
+            return "MEANREV_BB_LOWER_RSI_DIVERGENCE", 'meanrev', s
 
         rsi_oversold_bounce = (
             rsi_prev <= rsi_oversold_thr and rsi > rsi_prev and
@@ -241,7 +315,8 @@ def should_buy(row, prev_row, row_3_ago, spec, adjusted, regime):
             vol_ratio >= vol_thr * 0.8
         )
         if rsi_oversold_bounce:
-            return "MEANREV_RSI_OVERSOLD_BOUNCE", 'meanrev'
+            s = calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price, sma20, sma60, bb_mid, adx_thr, 0, bb_lower, bb_upper)
+            return "MEANREV_RSI_OVERSOLD_BOUNCE", 'meanrev', s
 
         mr_body_ratio = min_body_ratio * 0.5
         mr_quality_candle = candle_body_ratio > mr_body_ratio
@@ -250,9 +325,21 @@ def should_buy(row, prev_row, row_3_ago, spec, adjusted, regime):
             vol_ratio >= vol_thr * 0.7 and rsi < 45
         )
         if bb_squeeze_bounce and bb_sufficient:
-            return "MEANREV_BB_SQUEEZE_BOUNCE", 'meanrev'
+            s = calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price, sma20, sma60, bb_mid, adx_thr, 0, bb_lower, bb_upper)
+            return "MEANREV_BB_SQUEEZE_BOUNCE", 'meanrev', s
 
-    return None, None
+    # 突破策略（NEUTRAL态）
+    if regime == 'NEUTRAL':
+        breakout_ok = (
+            price > sma20 and vol_ratio >= vol_thr and
+            55 <= rsi <= 65 and macd > 0 and
+            is_green_candle and quality_candle and not macd_dead
+        )
+        if breakout_ok:
+            s = calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price, sma20, sma60, bb_mid, adx_thr, 1)
+            return "BREAKOUT_NEUTRAL", 'trend', s
+
+    return None, None, 0
 
 
 def should_sell(price, entry_price, highest_price, strategy_type, row, prev_row, spec, adjusted, holding_hours):
@@ -467,28 +554,38 @@ class NativeBacktester:
 
             # === 无持仓时：检查买入信号 ===
             if not self.position:
-                buy_reason, strategy_type = should_buy(row, prev_row, row_3_ago, self.spec, adjusted, regime)
+                buy_reason, strategy_type, signal_score = should_buy(row, prev_row, row_3_ago, self.spec, adjusted, regime)
 
                 if buy_reason:
-                    # HTF趋势过滤（简化版：用SMA60判断）
-                    price_below_sma60 = price < row['sma60']
-                    if price_below_sma60 and strategy_type == 'trend':
-                        # 熊市中禁止趋势跟踪入场
+                    # 信号评分映射仓位（中期规划-1）
+                    score_scale = score_to_position_scale(signal_score, self.spec)
+                    if score_scale == 0:
                         self.pending_buy = None
                         continue
 
+                    # HTF趋势过滤
+                    price_below_sma60 = price < row['sma60']
+                    if price_below_sma60 and strategy_type == 'trend':
+                        self.pending_buy = None
+                        continue
+
+                    # 动态资金分配（中期规划-2）：regime仓位缩放
+                    regime_scale = get_regime_position_scale(regime, strategy_type)
+                    # 评分仓位 × regime仓位
+                    final_scale = score_scale * regime_scale
+                    # HTF下跌时均值回归再减半
+                    if price_below_sma60:
+                        final_scale *= 0.5
+
                     # 信号二次确认
                     if strategy_type == 'meanrev':
-                        # 均值回归信号直接入场
-                        self._open_position(price, atr, buy_reason, strategy_type, i, row.name, row['sma60'])
+                        self._open_position(price, atr, buy_reason, strategy_type, i, row.name, row['sma60'], final_scale)
+                        self.pending_buy = None
                     elif self.pending_buy is not None:
-                        # 趋势信号连续2轮确认
-                        # HTF下跌时均值回归仓位减半
-                        position_scale = 0.5 if (price_below_sma60 and strategy_type == 'meanrev') else 1.0
-                        self._open_position(price, atr, buy_reason, strategy_type, i, row.name, row['sma60'], position_scale)
+                        self._open_position(price, atr, buy_reason, strategy_type, i, row.name, row['sma60'], final_scale)
                         self.pending_buy = None
                     else:
-                        self.pending_buy = buy_reason
+                        self.pending_buy = (buy_reason, signal_score)
                 else:
                     self.pending_buy = None
 
