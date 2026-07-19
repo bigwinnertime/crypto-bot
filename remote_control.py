@@ -18,6 +18,40 @@ exchange = None
 ADMIN_ID = None
 
 # 单例模式：确保只有一个 bot 实例
+
+
+def _safe_get_state():
+    """线程安全地读取 risk.state 快照（Telegram 线程专用）。"""
+    if risk is None:
+        return {}
+    with risk._file_lock:
+        # 返回 state 的浅拷贝快照，避免读取时被主线程修改
+        import copy
+        return copy.deepcopy(risk.state)
+
+
+def _safe_get_positions():
+    """线程安全地读取持仓信息。"""
+    state = _safe_get_state()
+    return state.get('positions', {})
+
+
+def _safe_get_virtual_account():
+    """线程安全地读取虚拟账户。"""
+    state = _safe_get_state()
+    return state.get('virtual_account', {})
+
+
+def _safe_get_trade_history():
+    """线程安全地读取交易历史。"""
+    state = _safe_get_state()
+    return state.get('trade_history', [])
+
+
+def _safe_get_fused_symbols():
+    """线程安全地读取熔断状态。"""
+    state = _safe_get_state()
+    return state.get('fused_symbols', {}), state.get('is_fused', False)
 _bot_instance = None
 _bot_lock = threading.Lock()
 
@@ -58,6 +92,11 @@ def init_remote_control(risk_manager):
     })
 
 def auth(message):
+    """鉴权：ADMIN_ID 未配置时拒绝所有请求，防止 None==None 绕过。"""
+    if ADMIN_ID is None:
+        return False
+    if message.from_user is None:
+        return False
     return message.from_user.id == ADMIN_ID
 
 # --- 0. 帮助指令 (/help) ---
@@ -103,7 +142,7 @@ def get_status(message):
     try:
         # A. 模拟/虚拟账户状态
         v_status = "📉 **虚拟账户 (Paper Trading)**\n"
-        virtual_acc = risk.state.get('virtual_account', {})
+        virtual_acc = _safe_get_virtual_account()
         v_balance = virtual_acc.get('balance', 0)
         v_pnl = virtual_acc.get('total_pnl', 0)
         v_status += f"💰 余额: `{v_balance:.2f} USDT`\n"
@@ -137,15 +176,15 @@ def get_status(message):
             r_status += f"⚠️ 获取失败: `{str(ex)[:50]}`"
 
         # C. 系统状态
-        is_fused = risk.state.get('is_fused', False)
-        fused_symbols = risk.state.get('fused_symbols', {})
+        is_fused = _safe_get_state().get('is_fused', False)
+        fused_symbols = _safe_get_fused_symbols()[0]
         if is_fused:
             fuse_status = "🚨 全局熔断"
         elif fused_symbols:
             fuse_status = f"⚠️ 部分熔断: {', '.join(fused_symbols.keys())}"
         else:
             fuse_status = "✅ 正常"
-        positions_count = len(risk.state.get('positions', {}))
+        positions_count = len(_safe_get_positions())
 
         report = (
             f"🤖 **交易机器人实时状态**\n"
@@ -213,7 +252,7 @@ def get_trailing_status(message):
         return
     
     try:
-        positions = risk.state.get('positions', {})
+        positions = _safe_get_positions()
         if not positions:
             bot.reply_to(message, "📭 **当前无持仓**\n\n机器人正在监控市场机会...", parse_mode='Markdown')
             return
@@ -304,7 +343,7 @@ def handle_emergency_fuse(message):
         return
     
     try:
-        is_already_fused = risk.state.get('is_fused', False)
+        is_already_fused = _safe_get_state().get('is_fused', False)
         if is_already_fused:
             bot.reply_to(message, 
                 "⚠️ **熔断已处于激活状态**\n\n"
@@ -333,7 +372,7 @@ def handle_unfuse(message):
         return
     
     try:
-        is_fused = risk.state.get('is_fused', False)
+        is_fused = _safe_get_state().get('is_fused', False)
         if not is_fused:
             bot.reply_to(message, 
                 "ℹ️ **熔断未激活**\n\n"
@@ -363,7 +402,7 @@ def get_positions(message):
     loading_msg = bot.reply_to(message, "⏳ 正在获取持仓数据...")
     
     try:
-        positions = risk.state.get('positions', {})
+        positions = _safe_get_positions()
         if not positions:
             bot.edit_message_text(
                 "📭 **当前无持仓**\n\n机器人正在监控市场机会...",
@@ -440,8 +479,8 @@ def get_performance(message):
     loading_msg = bot.reply_to(message, "⏳ 正在生成绩效报告...")
     
     try:
-        trade_history = risk.state.get('trade_history', [])
-        virtual_acc = risk.state.get('virtual_account', {})
+        trade_history = _safe_get_trade_history()
+        virtual_acc = _safe_get_virtual_account()
         
         # 虚拟账户数据
         initial_balance = virtual_acc.get('initial_balance', 10000.0)
@@ -505,7 +544,7 @@ def get_performance(message):
             report += f"└─ 平均单笔盈亏: `{avg_trade:+.2f} USDT`\n\n"
         
         # 当前持仓浮动盈亏
-        positions = risk.state.get('positions', {})
+        positions = _safe_get_positions()
         if positions:
             unrealized_pnl = 0
             for symbol, pos in positions.items():
@@ -521,7 +560,7 @@ def get_performance(message):
                 report += f"└─ 当前持仓浮动: `{unrealized_pnl:+.2f} USDT`\n\n"
         
         # 熔断状态
-        is_fused = risk.state.get('is_fused', False)
+        is_fused = _safe_get_state().get('is_fused', False)
         fuse_status = "🚨 已熔断" if is_fused else "✅ 正常运行"
         report += f"🛡️ **系统状态: {fuse_status}**"
         
@@ -628,7 +667,8 @@ def manage_config(message):
                 setattr(config, param_name, new_value)
                 bot.reply_to(message,
                     f"✅ **配置已更新**\n\n"
-                    f"`{param_name} = {new_value}`",
+                    f"`{param_name} = {new_value}`\n\n"
+                    f"⚠️ 此修改仅在本次运行有效，重启后将恢复默认值。",
                     parse_mode='Markdown')
                 return
             
@@ -726,13 +766,30 @@ def start_remote_listener():
 
         # 先停止任何现有的轮询
         bot.stop_polling()
-        # 使用非阻塞轮询模式
-        bot.polling(none_stop=True, interval=3, timeout=60)
+
+        # 自动重连轮询（异常后等待10秒重试，最多连续失败5次）
+        max_retries = 5
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                bot.polling(none_stop=True, interval=3, timeout=60)
+                retry_count = 0  # 成功运行后重置计数
+            except KeyboardInterrupt:
+                logger.info("👋 Bot 监听器已停止")
+                break
+            except Exception as e:
+                retry_count += 1
+                logger.error(f"Telegram bot polling error (第{retry_count}/{max_retries}次): {e}")
+                if retry_count < max_retries:
+                    import time as _time
+                    _time.sleep(10)  # 等待10秒后重试
+                else:
+                    logger.error("❌ Telegram 轮询连续失败5次，远程控制已停止")
 
     except KeyboardInterrupt:
         logger.info("👋 Bot 监听器已停止")
     except Exception as e:
-        logger.error(f"Telegram bot polling error: {e}")
+        logger.error(f"Telegram bot 启动失败: {e}")
     finally:
         # 清理锁文件
         if os.path.exists(lock_file):
