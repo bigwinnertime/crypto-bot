@@ -136,16 +136,20 @@ class AdvancedTradingBot:
         """
         市场状态识别：根据 ADX 强度 + 布林带宽度判断当前为趋势态/震荡态/中性。
         返回: 'TREND' | 'RANGE' | 'NEUTRAL'
+
+        RANGE 判定改为 OR（ADX 弱 或 布林带收口），降低 NEUTRAL 占比。
         """
         bb_width = (bb_upper - bb_lower) / price if price > 0 else 0
-        trend_adx = spec.get('regime_trend_adx', 25)
-        range_adx = spec.get('regime_range_adx', 20)
+        trend_adx = spec.get('regime_trend_adx', 22)
+        range_adx = spec.get('regime_range_adx', 22)
         trend_bb = spec.get('regime_trend_bb_width', 0.03)
         range_bb = spec.get('regime_range_bb_width', 0.02)
 
+        # 趋势态：ADX 强 且 布林带扩张
         if adx >= trend_adx and bb_width >= trend_bb:
             return 'TREND'
-        if adx <= range_adx and bb_width <= range_bb:
+        # 震荡态：ADX 弱 或 布林带收口（OR 判定，大幅降低 NEUTRAL 占比）
+        if adx <= range_adx or bb_width <= range_bb:
             return 'RANGE'
         return 'NEUTRAL'
 
@@ -296,10 +300,13 @@ class AdvancedTradingBot:
             if rsi >= mr_rsi_exit and profit_pct > 0:
                 return f"均值回归RSI退出 (RSI={rsi:.1f}≥{mr_rsi_exit})"
 
-            # 4. 超时强制退出
+            # 4. 超时退出：盈利则正常退出，微亏则也止损（避免拖久变深亏）
             holding_hours = self.risk._get_holding_hours(pos)
             if holding_hours >= mr_max_hold:
-                return f"均值回归超时退出 (持仓{holding_hours:.1f}h≥{mr_max_hold}h)"
+                if profit_pct >= 0:
+                    return f"均值回归超时止盈 (持仓{holding_hours:.1f}h≥{mr_max_hold}h, 盈利{profit_pct:.2%})"
+                else:
+                    return f"均值回归超时止损 (持仓{holding_hours:.1f}h≥{mr_max_hold}h, 亏损{profit_pct:.2%})"
 
             return None
 
@@ -308,17 +315,35 @@ class AdvancedTradingBot:
         profit_in_atr = (price - entry_price) / atr if atr > 0 else 0
         min_profit_pct = spec.get('min_profit_pct', 0.008)
 
+        # 动态ATR倍数：盈利不足时收紧追踪止损倍数，减少亏损幅度
+        # 盈利 < 1×ATR（刚入场）：用1.5倍（比默认更紧，快速止损）
+        # 盈利 1-3×ATR（小盈利）：用2.0倍（默认）
+        # 盈利 > 3×ATR（大盈利）：用2.5倍（给利润更多空间）
+        if profit_in_atr < 1.0:
+            atr_multi = min(atr_multi, 1.5)
+        elif profit_in_atr > 3.0:
+            atr_multi = atr_multi * 1.25
+
         # 1. ATR 追踪止损（无条件触发，止损优先）
         # 注意：atr<=0 时跳过此检查，避免 trail_stop=highest_price 导致刚买入就误触发
         if atr > 0:
             trail_stop = highest_price - atr_multi * atr
             if price <= trail_stop:
-                return f"ATR追踪止损 (价{price:.2f}≤线{trail_stop:.2f})"
+                return f"ATR追踪止损 (价{price:.2f}≤线{trail_stop:.2f}, 倍数{atr_multi:.1f})"
 
         # 2. 固定止损（无条件触发）
         hard_stop = entry_price * (1 - spec.get('stop_loss_pct', 0.04))
         if price <= hard_stop:
             return f"固定止损 (价{price:.2f}≤线{hard_stop:.2f})"
+
+        # 2.5 保本止损：盈利超过 breakeven_trigger（如2%）后，止损线上移至成本价
+        # 防止已盈利仓位反转为亏损，是提升盈亏比的关键机制
+        breakeven_trigger = spec.get('breakeven_trigger', 0.02)
+        breakeven_buffer = spec.get('breakeven_buffer', 0.003)  # 保本线上方留0.3%缓冲
+        if profit_pct >= breakeven_trigger:
+            breakeven_stop = entry_price * (1 + breakeven_buffer)
+            if price <= breakeven_stop:
+                return f"保本止损 (盈利{profit_pct:.1%}后回撤至成本线)"
 
         # 3. 主动止盈：盈利达到 N×ATR 时锁定利润
         profit_target = spec.get('profit_target_atr', 6.0)
@@ -361,8 +386,8 @@ class AdvancedTradingBot:
         macd_golden = (macd_prev < macd_sig and macd > macd_sig)
         macd_above_zero = macd > -abs(macd_sig) * 0.5
         macd_dead = (macd_prev > macd_sig and macd < macd_sig)
-        # 阳线实体占比阈值（过滤十字星/弱信号K线）
-        min_body_ratio = 0.30
+        # 阳线实体占比阈值（按币种可配置，过滤十字星/弱信号K线）
+        min_body_ratio = spec.get('min_body_ratio', 0.30)
         quality_candle = candle_body_ratio > min_body_ratio
         # #12: 以下阈值改用 spec.get()，避免改配置不生效
         adx_thr = adjusted.get('adx_threshold', 25)
@@ -387,22 +412,42 @@ class AdvancedTradingBot:
             if rsi_cross_50 and trend_ok and price > bb_mid and vol_ratio >= vol_thr * 0.8:
                 return "TREND_RSI_50_CROSS", 'trend'
 
-            # D. SMA20 突破 + 阳线质量
-            if (price > sma20 and rsi > 55 and
+            # D. SMA20 突破 + 阳线质量（RSI门槛从55放宽至50）
+            if (price > sma20 and rsi > 50 and
                     vol_ratio >= vol_thr and not macd_dead and is_green_candle and quality_candle):
                 return "TREND_SMA20_BREAKOUT", 'trend'
 
-        elif regime == 'RANGE':
-            # ── 均值回归信号 ──
-            # C. 布林下轨支撑 + RSI 底背离
-            touch_lower = price <= bb_lower * 1.005
+        # ── 均值回归信号（在 RANGE 和 NEUTRAL 态都允许触发）──
+        if regime in ('RANGE', 'NEUTRAL'):
+            # C1. 布林下轨支撑 + RSI 底背离
+            touch_lower = price <= bb_lower * 1.01  # 触下轨容差从0.5%放宽至1%
             bb_width = (bb_upper - bb_lower) / price
             bb_sufficient = bb_width > range_bb_width_thr
-            rsi_bouncing = (rsi_3_ago is not None and rsi > rsi_prev > rsi_3_ago and rsi < rsi_oversold_thr)
+            # RSI底背离：从"连续3根递增"放宽为"RSI从超卖区回升"（当前回升即可）
+            rsi_bouncing = (rsi > rsi_prev and rsi < rsi_oversold_thr)
             if touch_lower and bb_sufficient and rsi_bouncing and vol_ratio >= vol_thr * 0.8:
                 return "MEANREV_BB_LOWER_RSI_DIVERGENCE", 'meanrev'
 
-        # NEUTRAL: 观望
+            # C2. RSI 超卖反弹（RSI从超卖区回升 + 阳线确认 + 量能）
+            rsi_oversold_bounce = (
+                rsi_prev <= rsi_oversold_thr and rsi > rsi_prev and
+                rsi < 45 and is_green_candle and quality_candle and
+                vol_ratio >= vol_thr * 0.8
+            )
+            if rsi_oversold_bounce:
+                return "MEANREV_RSI_OVERSOLD_BOUNCE", 'meanrev'
+
+            # C3. 布林下轨缩口反弹（价格触及下轨后收阳 + 量能）
+            # 阳线要求放宽：实体占比门槛降低到 min_body_ratio 的一半（均值回归信号本就弱势）
+            mr_body_ratio = min_body_ratio * 0.5
+            mr_quality_candle = body_ratio > mr_body_ratio
+            bb_squeeze_bounce = (
+                touch_lower and is_green_candle and mr_quality_candle and
+                vol_ratio >= vol_thr * 0.7 and rsi < 45
+            )
+            if bb_squeeze_bounce and bb_sufficient:
+                return "MEANREV_BB_SQUEEZE_BOUNCE", 'meanrev'
+
         return None, None
 
     # ═══════════════════════════════════════════════════
@@ -410,26 +455,38 @@ class AdvancedTradingBot:
     # ═══════════════════════════════════════════════════
 
     def _calc_position_size(self, symbol, price, atr, total_usdt):
+        """波动率自适应仓位计算（平衡型）。
+
+        仓位由 risk_per_trade（风险下限）和 max_position_pct（仓位上限）共同约束：
+          - 风险仓位 = total * risk_per_trade / (atr_pct * atr_multiplier)
+          - 仓位上限 = total * max_position_pct
+          - 最终仓位 = clip(风险仓位, min_floor, 仓位上限)
+
+        这样在正常波动下 risk_per_trade 生效（不再是摆设），同时 max_position_pct
+        防止极端低波动时单笔仓位过大。旧参数 max_trade_amount/trade_amount 保留为 fallback。
+        """
         spec = self.risk.get_effective_config(symbol)
         risk_per_trade = spec.get('risk_per_trade', 0.01)
-        max_trade_amount = spec.get('max_trade_amount', spec.get('trade_amount', 20))
         atr_multiplier = spec.get('atr_multiplier', 2.0)
+        max_position_pct = spec.get('max_position_pct', 0.08)
+        max_trade_amount = spec.get('max_trade_amount', spec.get('trade_amount', 20))
         fallback_amount = spec.get('trade_amount', 20)
 
-        # #19: atr<=0 不拦截 NaN（NaN<=0 为 False），NaN 会一路传到 min/max 让下单失败。
-        #      用 pd.isna 显式拦截。
         if atr is None or pd.isna(atr) or atr <= 0:
             trade_amount = fallback_amount
         else:
-            # #29: 注意 risk_per_trade 名义上是"每笔风险占账户比例"，但下面算出的 trade_amount
-            #      = total*risk_per_trade / (atr_pct*multiplier)，在常见波动下远超 max_trade_amount，
-            #      实际几乎总是被截到 max_trade_amount。即真正生效的是 max_trade_amount（固定金额上限），
-            #      risk_per_trade 仅在极端高波动时才会成为约束。这是有意设计，非 bug。
+            atr_pct = atr / price
+            # 风险仓位：基于 risk_per_trade 的波动率自适应计算
             risk_amount = total_usdt * risk_per_trade
-            trade_amount = risk_amount / (atr / price * atr_multiplier)
+            risk_based_amount = risk_amount / (atr_pct * atr_multiplier)
 
-        trade_amount = max(trade_amount, 5)
-        trade_amount = min(trade_amount, max_trade_amount)
+            # 仓位上限：防止极端低波动时仓位过大
+            max_by_pct = total_usdt * max_position_pct
+
+            # 取风险仓位与仓位上限的较小值，再用 max_trade_amount 作为绝对上限
+            trade_amount = min(risk_based_amount, max_by_pct, max_trade_amount)
+
+        trade_amount = max(trade_amount, 5)  # 最小下单金额
 
         amount = trade_amount / price
         return amount, trade_amount
@@ -438,54 +495,90 @@ class AdvancedTradingBot:
     #  订单执行
     # ═══════════════════════════════════════════════════
 
-    def _execute_order(self, symbol, side, amount, price, mode, strategy_type='trend'):
+    def _calc_slippage(self, side, price, atr=None):
+        """计算模拟滑点（P0-3 滑点建模）。
+
+        买入时成交价上浮（付出更高），卖出时成交价下浮（收到更低），模拟真实市场冲击。
+        滑点 = max(ATR的5%, 固定0.1%)，用ATR可自适应不同波动率环境。
         """
-        执行订单。原子化：余额变动 + 持仓写入/删除在同一把锁内一次 save（修复 #2/#27）。
+        if atr is not None and not pd.isna(atr) and atr > 0:
+            slippage = max(atr * 0.05, price * 0.001)
+        else:
+            slippage = price * 0.001
+        if side == 'buy':
+            return price + slippage
+        else:
+            return price - slippage
+
+    def _execute_order(self, symbol, side, amount, price, mode, strategy_type='trend', atr=None, is_stop_loss=False):
+        """
+        执行订单（P0-3 滑点建模 + P2-8 限价单混合模式）。
+        原子化：余额变动 + 持仓写入/删除在同一把锁内一次 save。
         返回: (success, fill_price, fill_amount)
-          - 模拟交易: fill_price=信号价, fill_amount=计算量
-          - 实盘交易: fill_price/fill_amount 从订单响应中提取真实成交数据
+
+        订单类型策略（P2-8 混合模式）：
+          - 入场买入：限价单（挂在当前价，省手续费），未成交则放弃
+          - 止损/止盈卖出：市价单（保证执行）
+          - 策略信号卖出：限价单（省手续费）
+          is_stop_loss=True 时强制市价单。
+
+        模拟交易：加入滑点建模（fill_price = 信号价 ± 滑点），使模拟结果更接近实盘。
+        实盘交易：fill_price/fill_amount 从订单响应中提取真实成交数据。
         """
         FEE_RATE = 0.001
 
         if not config.LIVE_TRADE:
-            # 模拟交易：直接调用原子化的 execute_*_update（余额 + 持仓一次落盘）
+            # 模拟交易：加入滑点建模（P0-3）
+            sim_price = self._calc_slippage(side, price, atr)
+
             if side == 'buy':
-                cost = amount * price
+                cost = amount * sim_price
                 success, raw_cost, fee = self.risk.execute_buy_update(
-                    symbol, price, amount, cost, mode, strategy_type, FEE_RATE
+                    symbol, sim_price, amount, cost, mode, strategy_type, FEE_RATE
                 )
                 if not success:
                     logger.error(f"❌ 模拟购买失败：虚拟余额不足！(含手续费需: {raw_cost:.2f})")
                     return False, None, None
-                logger.info(f"🧪 [模拟买入] 成交:{raw_cost:.2f} | 手续费:{fee:.2f} | 剩余余额:{self.risk.state['virtual_account']['balance']:.2f}")
-                return True, price, amount
+                logger.info(f"🧪 [模拟买入] 成交:{raw_cost:.2f} (滑点价:{sim_price:.2f} vs 信号价:{price:.2f}) | 手续费:{fee:.2f} | 余额:{self.risk.state['virtual_account']['balance']:.2f}")
+                return True, sim_price, amount
 
             elif side == 'sell':
-                pnl_pct = self.risk.execute_sell_update(symbol, price, mode, FEE_RATE)
+                pnl_pct = self.risk.execute_sell_update(symbol, sim_price, mode, FEE_RATE)
                 if pnl_pct is None:
                     logger.error(f"❌ 模拟卖出失败：无持仓 {symbol}")
                     return False, None, None
-                logger.info(f"🧪 [模拟卖出] pnl: {pnl_pct:.2f}% | 余额: {self.risk.state['virtual_account']['balance']:.2f}")
-                return True, price, amount
+                logger.info(f"🧪 [模拟卖出] pnl: {pnl_pct:.2f}% (滑点价:{sim_price:.2f} vs 信号价:{price:.2f}) | 余额: {self.risk.state['virtual_account']['balance']:.2f}")
+                return True, sim_price, amount
 
             return False, None, None
 
-        # 实盘交易：先调交易所 API（#6 精度规整 + #7 瞬时错误重试），成交后校验（#8）再原子化更新本地持仓
-        # 卖出是风控必卖，重试更激进；买入失败可跳过，只试 1 次
-        max_retries = 3 if side == 'sell' else 1
+        # 实盘交易（P2-8 限价单混合模式）
+        # 判断订单类型：止损卖出 → 市价单（保证执行）；其他 → 限价单（省手续费）
+        use_limit_order = not (is_stop_loss and side == 'sell')
+
+        max_retries = 3 if (side == 'sell' and is_stop_loss) else 1
         base_backoff = 2.0
         order = None
         for attempt in range(1, max_retries + 1):
             try:
-                # #6: 按交易所精度规整下单量，避免因精度不符被拒单
                 precise_amount = self.exchange.amount_to_precision(symbol, amount)
-                if side == 'buy':
-                    order = self.exchange.create_market_buy_order(symbol, precise_amount)
+
+                if use_limit_order:
+                    # 限价单：买入挂略高于当前价（确保成交），卖出挂略低于当前价
+                    if side == 'buy':
+                        limit_price = self.exchange.price_to_precision(symbol, price * 1.001)
+                        order = self.exchange.create_limit_buy_order(symbol, precise_amount, limit_price)
+                    else:
+                        limit_price = self.exchange.price_to_precision(symbol, price * 0.999)
+                        order = self.exchange.create_limit_sell_order(symbol, precise_amount, limit_price)
                 else:
-                    order = self.exchange.create_market_sell_order(symbol, precise_amount)
+                    # 市价单（止损/止盈强制市价）
+                    if side == 'buy':
+                        order = self.exchange.create_market_buy_order(symbol, precise_amount)
+                    else:
+                        order = self.exchange.create_market_sell_order(symbol, precise_amount)
                 break
             except (ccxt.NetworkError, ccxt.DDoSProtection, ccxt.RateLimitExceeded) as e:
-                # #7: 网络/限频类瞬时错误，指数退避重试
                 if attempt < max_retries:
                     wait = base_backoff ** attempt
                     logger.warning(f"⚠️ [实盘{side}] 第{attempt}/{max_retries}次重试 ({type(e).__name__}): {e}，{wait}s 后重试")
@@ -493,30 +586,80 @@ class AdvancedTradingBot:
                 else:
                     logger.error(f"❌ [实盘{side}] {symbol} 重试 {max_retries} 次仍失败: {e}")
             except Exception as e:
-                # 非瞬时错误（余额不足/参数错误/签名失败等）不重试
                 logger.error(f"❌ [实盘{side}] {symbol} 订单执行失败（不重试）: {e}")
                 return False, None, None
 
         if order is None:
             return False, None, None
 
-        # #8: 校验成交信息——average/price/filled 任一为空都视为未成交，不回落到信号价
+        # 校验成交信息
         fill_price = order.get('average') or order.get('price')
         fill_amount = order.get('filled')
         if not fill_price or not fill_amount:
-            logger.error(f"❌ [实盘{side}] {symbol} 订单 {order.get('id')} 无成交信息（average/price/filled 为空），视为失败")
+            # 限价单可能未成交（open/partially_filled状态），检查状态
+            order_status = order.get('status', '')
+            if order_status in ('open', 'canceled', 'expired', 'rejected'):
+                logger.warning(f"⚠️ [实盘{side}] {symbol} 限价单未成交 (状态: {order_status})，放弃此订单")
+                return False, None, None
+            logger.error(f"❌ [实盘{side}] {symbol} 订单 {order.get('id')} 无成交信息，视为失败")
             return False, None, None
 
-        logger.info(f"✅ [实盘{side}] {symbol} 订单已执行: {order.get('id')} | 成交价:{fill_price} | 成交量:{fill_amount}")
+        logger.info(f"✅ [实盘{side}] {symbol} 订单已执行: {order.get('id')} | 成交价:{fill_price} | 成交量:{fill_amount} | 类型: {'限价' if use_limit_order else '市价'}")
         if side == 'buy':
             actual_cost = fill_amount * fill_price
             self.risk.execute_buy_update(
                 symbol, fill_price, fill_amount, actual_cost, mode, strategy_type
             )
+            # P0-2: 买入成功后在交易所挂止损单（实盘风控保护）
+            self._place_exchange_stop_loss(symbol, fill_price, fill_amount, strategy_type, atr)
             return True, fill_price, fill_amount
         else:
             self.risk.execute_sell_update(symbol, fill_price, mode)
             return True, fill_price, fill_amount
+
+    def _place_exchange_stop_loss(self, symbol, entry_price, amount, strategy_type, atr=None):
+        """P0-2: 在交易所挂止损单，防止软件监控间隔（4分钟）内的跳空风险。
+
+        止损价计算：
+          - trend 仓位：取固定止损和 ATR 止损中更接近入场价的（更早触发，更保守）
+          - meanrev 仓位：使用 meanrev_config.stop_loss_pct
+        挂单失败仅告警不阻断流程（软件止损仍会生效）。
+        """
+        try:
+            spec = self.risk.get_effective_config(symbol)
+
+            if strategy_type == 'meanrev':
+                mr_cfg = spec.get('meanrev_config', {})
+                stop_loss_pct = mr_cfg.get('stop_loss_pct', 0.025)
+                stop_price = entry_price * (1 - stop_loss_pct)
+            else:
+                # 趋势仓位：固定止损
+                fixed_stop = entry_price * (1 - spec.get('stop_loss_pct', 0.04))
+                stop_price = fixed_stop
+
+                # 若有 ATR，取 ATR 止损和固定止损中更高（更保守）的
+                atr_multi = spec.get('atr_multiplier', 2.0)
+                if atr and not pd.isna(atr) and atr > 0:
+                    atr_stop = entry_price - atr_multi * atr
+                    stop_price = max(stop_price, atr_stop)
+
+            # 规整精度并挂止损市价单
+            precise_stop = self.exchange.price_to_precision(symbol, stop_price)
+            precise_amount = self.exchange.amount_to_precision(symbol, amount)
+
+            self.exchange.create_order(
+                symbol=symbol,
+                type='STOP_LOSS',
+                side='sell',
+                amount=precise_amount,
+                price=precise_stop,
+                params={'stopPrice': precise_stop, 'type': 'STOP_LOSS'}
+            )
+            logger.info(f"🛡️ [实盘止损单] {symbol} 已挂止损单: 止损价 {precise_stop} (量: {precise_amount})")
+
+        except Exception as e:
+            # 止损单挂失败仅告警，不阻断买入流程（软件止损仍会生效）
+            logger.warning(f"⚠️ [实盘止损单] {symbol} 挂止损单失败（软件止损仍生效）: {e}")
 
     # ═══════════════════════════════════════════════════
     #  主循环
@@ -554,9 +697,13 @@ class AdvancedTradingBot:
                     if pos:
                         trailing_reason = self.risk.update_trailing_stop(symbol, price, df)
                         if trailing_reason:
-                            # _execute_order 内部已原子化完成"入账+历史+删仓位"，无需再调 execute_sell_update
+                            # 传入 atr 用于滑点建模，is_stop_loss=True 强制市价单
+                            trailing_atr = AverageTrueRange(df['high'], df['low'], df['close'],
+                                                            window=self.risk.get_effective_config(symbol).get('atr_period', 14)
+                                                            ).average_true_range().iloc[-1] if not df.empty else None
                             success, fill_price, fill_amount = self._execute_order(
-                                symbol, 'sell', pos['amount'], price, trailing_reason)
+                                symbol, 'sell', pos['amount'], price, trailing_reason,
+                                atr=trailing_atr, is_stop_loss=True)
                             if success:
                                 logger.warning(f"🚨 {symbol} 触发 {trailing_reason}")
                                 pnl = (fill_price / pos['entry_price'] - 1) * 100
@@ -567,16 +714,17 @@ class AdvancedTradingBot:
                     # --- 第二步：策略信号判定 ---
                     signal, mode, strategy_type = self.get_strategy_signal(df, symbol)
 
-                    # --- 第三步：信号确认（连续2轮相同信号才入场，过滤假突破）---
+                    # --- 第三步：信号确认（趋势信号需连续2轮BUY；均值回归信号直接入场）---
                     confirmed_mode = None
                     confirmed_strategy_type = None
                     if signal == "BUY" and not is_fused:
                         prev = self.pending_signals.get(symbol, {})
-                        if prev.get('signal') == 'BUY' and prev.get('mode') == mode:
-                            # 连续第2轮触发相同买入信号，确认入场
+                        # 均值回归信号条件严格（RSI超卖+阳线+量能），直接入场；趋势信号需连续2轮确认
+                        if strategy_type == 'meanrev' or prev.get('signal') == 'BUY':
+                            # 连续第2轮触发 BUY 信号（模式可不同），确认入场
                             confirmed_mode = mode
                             confirmed_strategy_type = strategy_type
-                            logger.info(f"✅ {symbol} 信号二次确认: {mode} (策略: {strategy_type})")
+                            logger.info(f"✅ {symbol} 信号二次确认: {mode} (策略: {strategy_type}, 前轮: {prev.get('mode')})")
                             self.pending_signals.pop(symbol, None)
                         else:
                             # 第1轮，记录信号，等待下一轮确认
@@ -591,9 +739,6 @@ class AdvancedTradingBot:
                     if confirmed_mode and self.risk.can_open_position(symbol, total_usdt):
                         # 多时间框架趋势检查
                         htf_trend = self._check_higher_tf_trend(symbol)
-                        if htf_trend == -1:
-                            logger.info(f"⚠️ {symbol} 高级时间框架处于下跌趋势，抑制买入信号 {confirmed_mode}")
-                            continue
 
                         # #9: ATR 窗口用 spec.get('atr_period', 14)，与信号生成处保持一致
                         spec_for_size = self.risk.get_effective_config(symbol)
@@ -602,12 +747,24 @@ class AdvancedTradingBot:
                                                ).average_true_range().iloc[-1]
                         amount, trade_amount = self._calc_position_size(symbol, price, atr, total_usdt)
 
-                        htf_label = "↗上升" if htf_trend == 1 else "→震荡"
+                        # HTF 下跌趋势时降低仓位（非完全禁止），仅允许均值回归信号入场
+                        # 趋势跟踪信号在 HTF 下跌时容易被套，禁止；均值回归信号是抄底反弹，允许但降仓
+                        if htf_trend == -1:
+                            if confirmed_strategy_type == 'trend':
+                                logger.info(f"⚠️ {symbol} HTF下跌趋势，禁止趋势跟踪入场 {confirmed_mode}")
+                                continue
+                            else:
+                                # 均值回归信号在熊市中允许入场，但仓位减半
+                                trade_amount = trade_amount * 0.5
+                                amount = trade_amount / price
+                                logger.info(f"⚠️ {symbol} HTF下跌趋势，均值回归仓位减半: {trade_amount:.2f}")
+
+                        htf_label = "↗上升" if htf_trend == 1 else ("↘下跌" if htf_trend == -1 else "→震荡")
                         logger.info(f"📤 准备执行买入: {symbol}, 金额: {trade_amount:.2f}, 价格: {price:.2f}, 4h趋势: {htf_label}")
-                        # _execute_order 内部已原子化完成"扣款+写仓位"，无需再调 execute_buy_update
+                        # 买入用限价单（P2-8），传入 atr 用于滑点建模
                         success, fill_price, fill_amount = self._execute_order(
                             symbol, 'buy', amount, price, confirmed_mode,
-                            strategy_type=confirmed_strategy_type)
+                            strategy_type=confirmed_strategy_type, atr=atr)
                         if success:
                             actual_cost = fill_amount * fill_price if config.LIVE_TRADE else trade_amount
                             safe_mode = confirmed_mode.replace("_", " ")
@@ -624,9 +781,12 @@ class AdvancedTradingBot:
 
                     # --- 第五步：执行策略卖出（熔断时仍执行） ---
                     elif signal == "SELL" and pos:
-                        # _execute_order 内部已原子化完成"入账+历史+删仓位"
+                        # 策略信号卖出用限价单，传入 atr 用于滑点建模
+                        sell_atr = AverageTrueRange(df['high'], df['low'], df['close'],
+                                                    window=self.risk.get_effective_config(symbol).get('atr_period', 14)
+                                                    ).average_true_range().iloc[-1] if not df.empty else None
                         success, fill_price, fill_amount = self._execute_order(
-                            symbol, 'sell', pos['amount'], price, mode)
+                            symbol, 'sell', pos['amount'], price, mode, atr=sell_atr)
                         if success:
                             pnl_pct = (fill_price / pos['entry_price'] - 1) * 100
                             send_notification(f"🔻 卖出成交: {symbol}",

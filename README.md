@@ -86,13 +86,13 @@
 阶段3: 盈利 18%  → 回撤 4%    触发卖出
 ```
 
-**时间衰减机制**: 持仓时间越长，追踪比例越小（4h 框架下延长观察期，48h 后才开始收紧）
+**时间衰减机制**: 持仓时间越长，追踪比例越小（4h 框架下延长观察期，96h 后才开始收紧）
 ```
-0-12小时   → 系数 1.0 (无衰减)
-12-24小时  → 系数 1.0 (无衰减)
-24-48小时  → 系数 0.9 (10%衰减)
-48-72小时  → 系数 0.75 (25%衰减)
-72小时+    → 系数 0.6 (40%衰减)
+0-24小时   → 系数 1.0 (无衰减)
+24-48小时  → 系数 1.0 (无衰减)
+48-96小时  → 系数 0.95 (5%衰减)
+96-144小时 → 系数 0.85 (15%衰减)
+144小时+   → 系数 0.75 (25%衰减)
 ```
 
 ### 🛡️ 多层风险控制
@@ -156,6 +156,8 @@ crypto-bot/
 ├── bot_engine.py                  # 核心交易引擎
 ├── risk_manager.py                # 风险管理器（含状态持久化、追踪止盈、熔断）
 ├── config.py                      # 配置文件（币种差异化参数、风控参数）
+├── backtest.py                    # 回测框架（backtrader 适配版）
+├── backtest_native.py             # 回测框架（原生版，直接复用 bot_engine 信号）
 ├── remote_control.py             # Telegram 远程控制
 ├── telegram_notifier.py          # Telegram 通知
 ├── report_generator.py           # 每日报告生成
@@ -272,6 +274,10 @@ python bot_engine.py
 | **python-dotenv** | >=1.0.0 | 环境变量管理，保护API密钥安全 |
 | **ta** | >=0.10.0 | 技术分析库，提供RSI、ADX、ATR等指标 |
 | **pyTelegramBotAPI** | >=4.10.0 | Telegram机器人API，远程控制接口 |
+| **backtrader** | >=1.9.78 | backtrader版回测框架（`backtest.py` 依赖） |
+| **matplotlib** | >=3.7.0 | backtrader版回测结果可视化 |
+
+> 💡 **提示**：`backtest_native.py`（原生版回测器）无需额外依赖，仅使用 ccxt/ta/pandas。
 
 ### 模拟交易测试
 
@@ -394,21 +400,102 @@ STRATEGY_CONFIG = {
 ### 风险控制参数
 
 ```python
-# 熔断机制（按币种独立触发）
-DRAWDOWN_FUSE = 0.08        # 单根K线跌幅阈值 8%
-FUSE_DURATION = 7200        # 熔断持续时间 2 小时 (秒)
+# 熔断机制（按币种独立触发，双层检测）
+DRAWDOWN_FUSE = 0.08            # 单根K线跌幅阈值 8%（防闪崩）
+DRAWDOWN_FUSE_MULTI_BAR = 0.10  # 多根K线累计跌幅阈值 10%（防阴跌）
+DRAWDOWN_FUSE_MULTI_BAR_COUNT = 3  # 多根熔断检查的K线根数
+FUSE_DURATION = 28800           # 熔断持续时间 8 小时 (适配4h框架，覆盖2根K线)
 
 # 仓位管理
-MAX_TOTAL_EXPOSURE = 0.7    # 总仓位价值占账户总资产最大比例 70%
+MAX_TOTAL_EXPOSURE = 0.7        # 总仓位价值占账户总资产最大比例 70%
 
 # 账户级最大回撤保护
-MAX_DRAWDOWN_PCT = 0.15     # 账户净值从最高点回撤 15% 暂停所有交易
-DRAWDOWN_COOLDOWN = 14400   # 回撤冷却 4 小时 (秒)
+MAX_DRAWDOWN_PCT = 0.15         # 账户净值从最高点回撤 15% 暂停所有交易
+DRAWDOWN_COOLDOWN = 86400       # 回撤冷却 24 小时 (防止过早恢复交易)
 
 # 相关性分组（同组币种限制同时持仓数量）
 CORRELATION_GROUPS = {'L1': ['BTC/USDT', 'ETH/USDT']}
 MAX_CORRELATED_POSITIONS = 1
 ```
+
+### 回测框架（双版本）
+
+项目提供两套回测框架，各有侧重，可根据需求选择使用。
+
+### 方案一：backtrader 版（`backtest.py`）
+
+基于 [backtrader](https://www.backtrader.com/) 库，将策略适配为 `bt.Strategy` 格式，生态成熟、功能丰富。
+
+**特点：**
+- 内置 50+ 分析器（夏普比率、最大回撤、交易分析等开箱即用）
+- 支持 K 线图可视化（`--plot` 参数）
+- 支持参数扫描（`cerebro.optstrategy`）
+- 适合策略探索、可视化分析、学习研究
+
+**使用方法：**
+
+```bash
+# 回测单个币种
+python backtest.py --symbol BTC/USDT --days 730
+
+# 回测所有配置币种
+python backtest.py --all --days 730
+
+# 指定起止日期 + 初始资金
+python backtest.py --symbol ETH/USDT --start 2024-01-01 --end 2025-01-01 --cash 5000
+
+# 显示K线图（需 matplotlib）
+python backtest.py --symbol BTC/USDT --days 365 --plot
+```
+
+**输出内容：** 总收益率、胜率、盈亏比、最大连续亏损、策略分布（趋势/均值回归）、退出原因统计、夏普比率、最大回撤等。
+
+### 方案二：原生版（`backtest_native.py`）
+
+轻量级自建回测器，直接复用 `bot_engine.py` 的信号逻辑和 `ta` 库指标，**回测结果与实盘完全一致**。
+
+**特点：**
+- 指标用 `ta` 库（与实盘 `bot_engine.py` 完全一致，无计算差异）
+- 信号逻辑直接复用 `bot_engine` 的 `_detect_regime` / `_should_buy` / `_should_sell`
+- 无框架约束，纯 pandas/Python 实现，易于扩展
+- 适合实盘上线前验证、精确回测、参数优化
+
+**使用方法：**
+
+```bash
+# 回测单个币种
+python backtest_native.py --symbol BTC/USDT --days 730
+
+# 回测所有配置币种
+python backtest_native.py --all --days 730
+
+# 指定起止日期 + 初始资金
+python backtest_native.py --symbol ETH/USDT --start 2024-01-01 --end 2025-01-01 --cash 5000
+```
+
+**输出内容：** 总收益率、胜率、盈亏比、最大连续亏损、策略分布、退出原因统计、最近交易明细。
+
+### 两套回测器对比
+
+| 特性 | backtrader 版 | 原生版 |
+|------|--------------|--------|
+| **指标一致性** | 有细微差异（ADX/RSI实现不同） | 与实盘完全一致 |
+| **代码复用** | 需改写为 `bt.Strategy` 格式 | 直接复用 `bot_engine` 信号逻辑 |
+| **可视化** | 支持 `--plot` K线图 | 无 |
+| **参数扫描** | 内置 `optstrategy` | 需自己实现循环 |
+| **性能** | ~12s/币种 | ~11s/币种 |
+| **学习成本** | 需学习 backtrader API | 纯 pandas，无额外框架 |
+| **依赖** | 需安装 backtrader + matplotlib | 仅依赖已有的 ccxt/ta/pandas |
+| **适用场景** | 策略探索、可视化、学习 | 实盘验证、精确回测 |
+
+### 使用建议
+
+- **实盘上线前验证** → 用 `backtest_native.py`（结果与实盘一致）
+- **策略探索/可视化分析** → 用 `backtest.py`（有图表、分析器丰富）
+- **参数优化** → 两个均可，native 更准确
+- **快速验证信号逻辑** → 用 `backtest_native.py`（轻量、无框架约束）
+
+> ⚠️ **注意**：两套回测器结果会有 5-10% 的差异，主要来自 backtrader 的 ADX/RSI 指标实现与 `ta` 库的细微差别。实盘前验证请以 `backtest_native.py` 为准。
 
 ---
 
@@ -429,8 +516,10 @@ D.  SMA20 突破 + RSI>55 + 量能 + 阳线质量
 
 #### 震荡态 (RANGE) 进场 — 均值回归
 ```
-C. 价格触及布林下轨 + 布林带宽度充足 + RSI 底背离(连续回升) + 量能
-→ 触发 BUY（策略类型 meanrev）
+C1. 布林下轨支撑 + 布林带宽度充足 + RSI 底背离(连续回升) + 量能
+C2. RSI 超卖反弹 (RSI从超卖区回升 + 阳线确认 + 量能)
+C3. 布林下轨缩口反弹 (价格触及下轨后收阳 + 量能)
+→ 任一满足即触发 BUY（策略类型 meanrev）
 ```
 
 #### 中性态 (NEUTRAL)
@@ -486,15 +575,26 @@ volume_ratio = current_volume / volume_ma
 
 ### 止损体系
 
-系统采用三层止损保护：
+系统采用多层止损保护：
 
 ```
-第一层: ATR动态止损 (优先)
+第一层: 交易所端止损单 (实盘)
+  ↓ 买入后立即在交易所挂 STOP_LOSS 单，防4分钟轮询间隔跳空
+第二层: ATR动态止损 (优先，软件层)
   ↓ 价格跌破 ATR止损线
-第二层: 固定百分比止损 (备选)
+第三层: 固定百分比止损 (备选)
   ↓ 亏损达到设定百分比
-第三层: 熔断保护 (极端情况)
-  ↓ 单根K线暴跌 > 8%
+第四层: 熔断保护 (极端情况，双层检测)
+  ↓ 单根K线暴跌 > 8% 或 连续3根累计跌幅 > 10%
+```
+
+### 订单执行（混合模式）
+
+```
+入场买入: 限价单 (挂略高于当前价，省手续费，未成交则放弃)
+止损/止盈卖出: 市价单 (保证执行)
+策略信号卖出: 限价单 (省手续费)
+模拟交易: 加入滑点建模 (ATR的5%或固定0.1%)
 ```
 
 ### 追踪止盈示例
@@ -524,9 +624,15 @@ volume_ratio = current_volume / volume_ma
 if symbol in positions:
     拒绝开仓  # 已有持仓
 
+# 波动率自适应仓位（平衡型）
+risk_amount = total * risk_per_trade              # 风险下限 (1%)
+risk_based = risk_amount / (atr_pct * atr_multi)  # 风险仓位
+max_by_pct = total * max_position_pct             # 仓位上限 (6-8%)
+trade_amount = min(risk_based, max_by_pct, max_trade_amount)
+
 # 总仓位限制
 total_cost = sum(所有持仓成本)
-if total_cost / total_balance > 0.3:
+if total_cost / total_balance > 0.7:
     拒绝开仓  # 仓位过重
 ```
 
@@ -598,114 +704,165 @@ TELEGRAM_CHAT_ID=123456789
 
 ---
 
-## 🔮 未来优化规划
+## 🔮 优化规划
 
-### 短期优化 (1-2个月)
+### ✅ 短期优化（已完成）
 
-#### 1. 多时间框架分析
+以下功能已在当前版本中实现：
+
+| 功能 | 实现位置 | 说明 |
+|------|---------|------|
+| **多时间框架分析** | `bot_engine.py` `_check_higher_tf_trend()` | 1d趋势过滤4h信号，HTF下跌时禁止趋势入场、均值回归降仓 |
+| **市场状态识别** | `bot_engine.py` `_detect_regime()` | ADX+布林带宽度识别 TREND/RANGE/NEUTRAL，OR判定降低NEUTRAL占比 |
+| **回测系统** | `backtest.py` + `backtest_native.py` | 双版本回测框架：backtrader版（可视化+分析器）+ 原生版（与实盘一致） |
+| **历史数据回测** | 两个回测器 | 支持指定币种/天数/起止日期/初始资金 |
+| **性能指标可视化** | `backtest.py --plot` | backtrader内置K线图+指标+买卖点 |
+| **参数优化工具** | `backtest_native.py` | 可编程式参数扫描，直接复用实盘信号逻辑 |
+
+### 📋 中期优化 (3-6个月)
+
+基于当前架构和数据量，以下规划务实且可实施：
+
+#### 1. 信号强度评分系统
+
+> 替代原"机器学习增强"规划。当前单币种730天仅38-51笔交易，样本量不足以训练ML模型，过拟合风险高。改为规则驱动的信号评分更务实。
+
+**设计思路：**
 ```python
-# 计划实现
-def multi_timeframe_check(symbol):
-    daily_trend = get_trend('1d', symbol)   # 大周期趋势
-    hourly_signal = get_signal('1h', symbol) # 小周期信号
-    
-    # 只做大周期方向的交易
-    if daily_trend == 'UP' and hourly_signal == 'BUY':
-        return True
+# 不训练模型，而是给每个信号条件打分加权
+signal_score = 0
+if macd_golden: signal_score += 30
+if vol_ratio >= 1.5: signal_score += 20
+if adx > 25: signal_score += 25
+if rsi_bouncing: signal_score += 25
+
+# 评分越高，仓位越大
+position_scale = min(signal_score / 100, 1.0)  # 0.5-1.0
 ```
 
-**优势**:
-- 避免逆大势交易
-- 提高信号可靠性
-- 减少假信号
+**实施步骤：**
+1. 定义各信号条件的权重（基于回测验证）
+2. 评分映射到仓位比例（高分满仓，低分半仓）
+3. 评分低于阈值时放弃入场
 
-#### 2. 市场状态识别
+**预期效果：** 高质量信号加大仓位，低质量信号减仓或放弃，提升整体盈亏比
+
+#### 2. 动态资金分配
+
+> 替代原"风险平价模型"。当前三币种固定 `max_position_pct`，不区分市场状态。
+
+**设计思路：**
 ```python
-# 计划实现
-def identify_market_state(df):
-    adx = calculate_adx(df)
-    atr_pct = calculate_atr_pct(df)
-    bb_width = calculate_bollinger_width(df)
-    
-    if adx > 25 and bb_width > threshold:
-        return "TREND"
-    elif adx < 20 and atr_pct < threshold:
-        return "RANGE"
-    else:
-        return "TRANSITION"  # 过渡期，暂停交易
+# 根据当前 regime 和历史胜率动态调整各币种仓位
+if regime == 'TREND':
+    btc_scale = 1.2   # BTC趋势行情好，加大仓位
+    sol_scale = 0.8   # SOL趋势行情波动大，减小仓位
+elif regime == 'RANGE':
+    btc_scale = 0.6   # BTC震荡行情表现差，减小仓位
+    sol_scale = 1.2   # SOL震荡行情均值回归表现好，加大仓位
 ```
 
-**优势**:
-- 精准识别市场状态
-- 过渡期自动规避
-- 提升策略匹配度
+**实施步骤：**
+1. 回测各币种在不同 regime 下的胜率和盈亏比
+2. 建立 regime-币种-仓位 矩阵
+3. 每轮循环根据当前 regime 调整 `max_position_pct`
 
-#### 3. 回测系统
-- 历史数据回测框架
-- 策略参数优化工具
-- 性能指标可视化
+**预期效果：** 将资金分配给当前环境下表现最好的币种，提升资金利用率
 
-### 中期优化 (3-6个月)
+#### 3. 策略组合扩展
 
-#### 1. 机器学习增强
-```python
-# 特征工程
-features = [
-    'price_momentum',      # 价格动量
-    'volume_pattern',      # 成交量模式
-    'volatility_regime',   # 波动率状态
-    'market_sentiment',    # 市场情绪
-]
+> 当前仅有趋势跟踪+均值回归双模式，可扩展更多策略类型。
 
-# 模型预测
-model = RandomForestClassifier()
-model.fit(features, labels)
-prediction = model.predict(current_features)
+**候选策略：**
+- **突破策略** — 价格突破N根K线高低点入场（适合 NEUTRAL→TREND 过渡期）
+- **动量策略** — 基于价格变化率（ROC）排名入场
+- **网格策略** — 在 RANGE 态自动挂网格单（适合震荡市）
+
+**实施步骤：**
+1. 在 `bot_engine.py` 新增策略信号函数
+2. 通过回测验证新策略的独立表现
+3. 与现有策略组合，信号冲突时按评分优先级选择
+
+### 🎯 长期规划 (6-12个月)
+
+#### 1. Web 管理界面
+
+> 最务实的长期规划，已有 Telegram 远程控制基础，Web 版是自然延伸。
+
+**技术选型：** Streamlit（快速搭建，1-2周可出原型）
+
+**功能模块：**
+```
+📊 实时仪表盘
+├── 账户净值 + 收益曲线
+├── 当前持仓 + 浮动盈亏
+├── Regime 状态实时展示
+└── 熔断/回撤状态
+
+⚙️ 策略管理
+├── 参数在线调整（config.py 远程化）
+├── 策略开关（启用/禁用某币种或信号）
+└── 回测触发 + 结果展示
+
+📈 历史分析
+├── 交易明细 + 盈亏分布
+├── 退出原因统计
+└── 月度/周度报告
 ```
 
-**应用场景**:
-- 信号强度评分
-- 市场状态预测
-- 异常检测
+**实施步骤：**
+1. 用 Streamlit 搭建基础框架，读取 `bot_state.json`
+2. 实现实时仪表盘（自动刷新）
+3. 接入参数调整功能（写入 runtime_config）
+4. 集成回测触发（调用 `backtest_native.py`）
 
-#### 2. 高级订单类型
-- 冰山订单 (隐藏大额交易)
-- TWAP/VWAP 执行算法
-- 条件单 (突破触发)
+#### 2. 市场情绪集成
 
-#### 3. 组合管理
-- 多策略组合
-- 动态资金分配
-- 风险平价模型
+> 简化版"极端行情应对"。不接入付费新闻API和NLP模型，而是用免费的恐惧贪婪指数。
 
-### 长期规划 (6-12个月)
+**数据源：**
+- [Crypto Fear & Greed Index](https://api.alternative.me/fng/) — 免费，每日更新
+- 计算 0-100 情绪分数（0=极度恐惧，100=极度贪婪）
 
-#### 1. 极端行情应对
+**应用场景：**
 ```python
-# 黑天鹅检测
-def detect_black_swan(df, news_api):
-    price_crash = detect_crash(df)
-    negative_news = analyze_news_sentiment(news_api)
-    
-    if price_crash and negative_news:
-        trigger_emergency_exit()
+# 情绪极端时调整策略
+if fear_greed < 20:    # 极度恐惧
+    # 禁止趋势跟踪入场（可能继续下跌）
+    # 均值回归信号仓位减半（接飞刀风险）
+elif fear_greed > 80:  # 极度贪婪
+    # 趋势仓位收紧止盈（可能见顶）
+    # 禁止均值回归入场（可能不回归）
 ```
 
-**功能**:
-- 新闻情绪分析
-- 链上数据监控
-- 自动风险对冲
+**实施步骤：**
+1. 新增 `sentiment.py` 模块，每日拉取恐惧贪婪指数
+2. 在 `get_strategy_signal` 中加入情绪过滤
+3. 回测验证情绪过滤的效果（历史数据可获取）
 
-#### 2. DeFi 集成
-- DEX 交易支持
-- 流动性挖矿
-- 套利策略
+#### 3. 异常检测与预警
 
-#### 3. Web 管理界面
-- 实时监控仪表盘
-- 策略参数调整
-- 历史交易分析
-- 性能报告生成
+> 简化版"黑天鹅检测"。不依赖链上数据和新闻NLP，基于价格行为检测异常。
+
+**检测维度：**
+```python
+# 1. 波动率异常：ATR 突然放大到历史均值的 N 倍
+if current_atr > avg_atr_30d * 2.5:
+    trigger_warning("波动率异常飙升")
+
+# 2. 成交量异常：成交量放大到均值的 N 倍但价格不动
+if vol_ratio > 3.0 and abs(price_change) < 0.01:
+    trigger_warning("量价背离异常")
+
+# 3. 跨币种相关性异常：BTC/ETH/SOL 同时异动
+if all_three_drop > 0.05 in 4h:
+    trigger_warning("系统性风险预警")
+```
+
+**实施步骤：**
+1. 在主循环中加入异常检测逻辑
+2. 异常时发送 Telegram 预警
+3. 严重异常时自动触发全局熔断
 
 ---
 

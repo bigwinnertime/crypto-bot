@@ -96,7 +96,12 @@ class RiskManager:
     # ═══════════════════════════════════════════════════
 
     def check_circuit_breaker(self, symbol, df):
-        """熔断机制：按币种独立触发，防止在暴跌中持续接飞刀"""
+        """熔断机制：按币种独立触发，防止在暴跌中持续接飞刀。
+
+        两层检测：
+        1. 单根K线暴跌（DRAWDOWN_FUSE，防闪崩）
+        2. 多根K线累计跌幅（DRAWDOWN_FUSE_MULTI_BAR，防阴跌）
+        """
         if len(df) < 2:
             return False
 
@@ -104,7 +109,7 @@ class RiskManager:
 
         # 全局熔断（Telegram /fuse 命令）
         if self.state.get('is_fused', False):
-            fuse_duration = getattr(config, 'FUSE_DURATION', 7200)
+            fuse_duration = getattr(config, 'FUSE_DURATION', 28800)
             elapsed = time.time() - self.state.get('fuse_time', 0)
             if elapsed > fuse_duration:
                 logger.info("🛡️ 全局熔断冷却期结束，系统恢复监控。")
@@ -114,9 +119,10 @@ class RiskManager:
             else:
                 return True
 
-        # 按币种独立熔断
-        change = (df['close'].iloc[-1] - df['close'].iloc[-2]) / df['close'].iloc[-2]
+        # --- 按币种独立熔断 ---
 
+        # 1. 单根K线暴跌检测（防闪崩）
+        change = (df['close'].iloc[-1] - df['close'].iloc[-2]) / df['close'].iloc[-2]
         if change < -self.fuse_limit:
             logger.error(f"🚨 {symbol} 发生异常暴跌 ({change:.2%})！启动该币种熔断保护。")
             if 'fused_symbols' not in self.state:
@@ -125,10 +131,25 @@ class RiskManager:
             self.save_state()
             return True
 
+        # 2. 多根K线累计跌幅检测（防阴跌）
+        multi_bar_count = getattr(config, 'DRAWDOWN_FUSE_MULTI_BAR_COUNT', 3)
+        multi_bar_threshold = getattr(config, 'DRAWDOWN_FUSE_MULTI_BAR', 0.10)
+        if len(df) >= multi_bar_count + 1:
+            ref_close = df['close'].iloc[-(multi_bar_count + 1)]
+            cur_close = df['close'].iloc[-1]
+            multi_bar_change = (cur_close - ref_close) / ref_close
+            if multi_bar_change < -multi_bar_threshold:
+                logger.error(f"🚨 {symbol} 连续{multi_bar_count}根K线累计跌幅 ({multi_bar_change:.2%})！启动阴跌熔断保护。")
+                if 'fused_symbols' not in self.state:
+                    self.state['fused_symbols'] = {}
+                self.state['fused_symbols'][symbol] = time.time()
+                self.save_state()
+                return True
+
         # 检查该币种的熔断是否过期
         fused_symbols = self.state.get('fused_symbols', {})
         if symbol in fused_symbols:
-            fuse_duration = getattr(config, 'FUSE_DURATION', 7200)
+            fuse_duration = getattr(config, 'FUSE_DURATION', 28800)
             elapsed = time.time() - fused_symbols[symbol]
             if elapsed > fuse_duration:
                 logger.info(f"🛡️ {symbol} 熔断冷却期结束，恢复监控。")
@@ -150,7 +171,7 @@ class RiskManager:
         fused_symbols = self.state.get('fused_symbols', {})
         if symbol in fused_symbols:
             import config
-            fuse_duration = getattr(config, 'FUSE_DURATION', 7200)
+            fuse_duration = getattr(config, 'FUSE_DURATION', 28800)
             elapsed = time.time() - fused_symbols[symbol]
             if elapsed > fuse_duration:
                 return False  # 已过期
