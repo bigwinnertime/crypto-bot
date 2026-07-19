@@ -95,10 +95,10 @@ class AnomalyDetector:
         if len(symbol_data) < 2:
             return False, "", False
 
-        # 所有币种同时跌幅 > 5%
-        all_drop = all(change < -0.05 for change in symbol_data.values())
-        # 至少2个币种跌幅 > 3%
-        significant_drops = sum(1 for change in symbol_data.values() if change < -0.03)
+        # 所有币种同时跌幅 > 8%（4h K线级别，5%太常见）
+        all_drop = all(change < -0.08 for change in symbol_data.values())
+        # 至少2个币种跌幅 > 5%（4h K线单根3%很常见，提高到5%）
+        significant_drops = sum(1 for change in symbol_data.values() if change < -0.05)
 
         if all_drop or significant_drops >= 2:
             changes_str = ", ".join(f"{s}: {c:.2%}" for s, c in symbol_data.items())

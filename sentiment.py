@@ -25,7 +25,7 @@ EXTREME_GREED_THRESHOLD = 80
 # 缓存（每日更新一次即可）
 _cached_sentiment = None
 _cached_timestamp = 0
-_CACHE_TTL = 3600  # 1小时缓存
+_CACHE_TTL = 21600  # 6小时缓存（API数据每日更新，6小时足够及时）
 
 
 def fetch_fear_greed_index():

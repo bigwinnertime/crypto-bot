@@ -28,11 +28,20 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_state
 
 @st.cache_data(ttl=10)  # 10秒缓存
 def load_state():
-    """加载 bot_state.json。"""
+    """加载 bot_state.json（安全读取，防止与 risk_manager 并发写冲突）。"""
+    import fcntl
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                # 加共享锁防止读取时被写入覆盖（非阻塞，锁不到就直接读）
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except (IOError, OSError):
+                    pass  # 获取锁失败也继续读取（最坏情况是读到半写入的数据）
                 return json.load(f)
+    except json.JSONDecodeError:
+        # 文件正在被写入，JSON 解析失败 → 返回空状态
+        pass
     except Exception as e:
         st.error(f"加载状态文件失败: {e}")
     return {}

@@ -546,8 +546,13 @@ class AdvancedTradingBot:
                 # 市场情绪更新（每小时更新一次，长期规划-2）
                 now_ts = time.time()
                 if now_ts - self._sentiment_update_time > 3600:
-                    self._sentiment_scale = get_sentiment_scale()
-                    self._sentiment_update_time = now_ts
+                    new_scale = get_sentiment_scale()
+                    if new_scale and new_scale.get('score') is not None:
+                        self._sentiment_scale = new_scale
+                        self._sentiment_update_time = now_ts
+                    else:
+                        # API 失败时不更新时间戳，10分钟后重试（而非等1小时）
+                        self._sentiment_update_time = now_ts - 2700  # 3600-2700=900s=15min后重试
 
                 # 异常检测（长期规划-3）：收集所有币种数据后统一检测
                 symbol_changes = {}
