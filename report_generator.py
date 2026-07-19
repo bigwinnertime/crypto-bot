@@ -3,6 +3,8 @@ from datetime import datetime
 import logging
 import time
 
+import config
+
 logger = logging.getLogger(__name__)
 
 class ReportGenerator:
@@ -45,11 +47,15 @@ class ReportGenerator:
 
         # --- 1. 账户实时摘要 ---
         current_balance = acc.get('balance', 0)
-        # 计算在途仓位当前价值 (简单处理：以成本计，若想更准需要传入实时价)
-        pos_value = sum(p.get('cost', 0) for p in positions.values())
+        # 计算在途仓位当前价值（用 current_price 计算市值，而非入场成本）
+        pos_value = 0
+        for symbol, p in positions.items():
+            pos_amount = p.get('amount', 0)
+            pos_price = p.get('current_price', p.get('entry_price', 0))
+            pos_value += pos_amount * pos_price
         total_equity = current_balance + pos_value
         initial_balance = acc.get('initial_balance', 10000)
-        total_roi = ((total_equity / initial_balance) - 1) * 100
+        total_roi = ((total_equity / initial_balance) - 1) * 100 if initial_balance > 0 else 0
         total_fees = acc.get('total_fees', 0)
 
         print("\n" + "="*40)
@@ -70,11 +76,16 @@ class ReportGenerator:
             print("   暂无持仓")
         else:
             for symbol, data in positions.items():
-                # #17: 用 .get() 避免 highest_price 缺字段时 KeyError
                 entry_price = data.get('entry_price', 0)
                 highest_price = data.get('highest_price', entry_price)
+                current_price = data.get('current_price', entry_price)
                 high_gain = (highest_price / entry_price - 1) * 100 if entry_price > 0 else 0
-                print(f"🔹 {symbol}: 入场 {entry_price:.2f} | 最高点涨幅 +{high_gain:.2f}%")
+                unrealized_pnl = ((current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+                pos_amount = data.get('amount', 0)
+                pos_value = pos_amount * current_price
+                strategy = '趋势' if data.get('strategy_type') == 'trend' else '均值'
+                print(f"🔹 {symbol} [{strategy}]: 入场 {entry_price:.2f} | 现价 {current_price:.2f} | "
+                      f"未实现盈亏 {unrealized_pnl:+.2f}% | 市值 {pos_value:.2f} | 最高涨幅 +{high_gain:.2f}%")
 
         # --- 3. 历史交易分析 ---
         print("\n📈 历史交易统计:")
@@ -84,18 +95,17 @@ class ReportGenerator:
             # 标准化数据结构以适配不同的字段名
             normalized_history = []
             for trade in history:
-                # 计算盈亏金额（如果不存在pnl_amount字段）
-                pnl_amount = trade.get('pnl_amount', 0)
-                if pnl_amount == 0:
-                    # #16: 从 config 读取交易金额，而非硬编码 30/20/10
-                    import config
-                    symbol = trade.get('symbol', '')
-                    sym_cfg = config.STRATEGY_CONFIG.get(symbol, config.DEFAULT_CONFIG)
-                    trade_amount = sym_cfg.get('trade_amount', 10)
-
-                    # 根据收益率计算盈亏金额
-                    pnl_pct = trade.get('pnl_pct', 0)
-                    pnl_amount = trade_amount * (pnl_pct / 100)
+                # 计算盈亏金额（仅当 pnl_amount 字段不存在时才回退计算）
+                pnl_amount = trade.get('pnl_amount')
+                if pnl_amount is None:
+                    # 回退路径：用 entry_price 和 amount 估算（比 trade_amount 更准确）
+                    entry_p = trade.get('entry_price', trade.get('entry', 0))
+                    exit_p = trade.get('sell_price', trade.get('exit', 0))
+                    trade_amt = trade.get('amount', 0)
+                    # 估算 PnL = (出场价 - 入场价) × 数量 - 双边手续费
+                    raw_pnl = (exit_p - entry_p) * trade_amt
+                    fee_est = entry_p * trade_amt * config.FEE_RATE + exit_p * trade_amt * config.FEE_RATE if hasattr(config, 'FEE_RATE') else 0
+                    pnl_amount = raw_pnl - fee_est
                 
                 normalized_trade = {
                     'symbol': trade.get('symbol', ''),
