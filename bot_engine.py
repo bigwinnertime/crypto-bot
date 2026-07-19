@@ -135,7 +135,7 @@ class AdvancedTradingBot:
                而非此前的 0（震荡，允许买入）——避免在 HTF 真实下跌时因 API 失败而误买入。
         """
         htf = getattr(config, 'HIGHER_TIMEFRAME', '4h')
-        df_htf = self.fetch_data(symbol, timeframe=htf, limit=60)
+        df_htf = self.fetch_data(symbol, timeframe=htf, limit=80)
         if df_htf.empty or len(df_htf) < 60:
             logger.warning(f"{symbol} HTF({htf}) 数据不足，fail-safe 视为下跌趋势抑制买入")
             return -1
@@ -440,9 +440,16 @@ class AdvancedTradingBot:
         fill_price = order.get('average') or order.get('price')
         fill_amount = order.get('filled')
         if not fill_price or not fill_amount:
-            # 限价单可能未成交（open/partially_filled状态），检查状态
+            # 限价单可能未成交，检查状态并取消残留挂单
             order_status = order.get('status', '')
-            if order_status in ('open', 'canceled', 'expired', 'rejected'):
+            if order_status in ('open', 'partially_filled', 'canceled', 'expired', 'rejected'):
+                # 取消交易所残留挂单（防止后续意外成交导致状态不一致）
+                if order_status in ('open', 'partially_filled'):
+                    try:
+                        self.exchange.cancel_order(order.get('id'), symbol)
+                        logger.info(f"🧹 [实盘{side}] {symbol} 已取消未成交挂单 {order.get('id')}")
+                    except Exception as cancel_err:
+                        logger.warning(f"⚠️ [实盘{side}] {symbol} 取消挂单失败 {order.get('id')}: {cancel_err}")
                 logger.warning(f"⚠️ [实盘{side}] {symbol} 限价单未成交 (状态: {order_status})，放弃此订单")
                 return False, None, None
             logger.error(f"❌ [实盘{side}] {symbol} 订单 {order.get('id')} 无成交信息，视为失败")
@@ -454,11 +461,13 @@ class AdvancedTradingBot:
             self.risk.execute_buy_update(
                 symbol, fill_price, fill_amount, actual_cost, mode, strategy_type
             )
-            # P0-2: 买入成功后在交易所挂止损单（实盘风控保护）
+            # 买入成功后在交易所挂止损单（实盘风控保护）
             self._place_exchange_stop_loss(symbol, fill_price, fill_amount, strategy_type, atr)
             return True, fill_price, fill_amount
         else:
             self.risk.execute_sell_update(symbol, fill_price, mode)
+            # 卖出后取消交易所残留的止损单（防止仓位已清零但止损单仍挂着）
+            self._cancel_exchange_stop_loss(symbol)
             return True, fill_price, fill_amount
 
     def _place_exchange_stop_loss(self, symbol, entry_price, amount, strategy_type, atr=None):
@@ -504,6 +513,21 @@ class AdvancedTradingBot:
         except Exception as e:
             # 止损单挂失败仅告警，不阻断买入流程（软件止损仍会生效）
             logger.warning(f"⚠️ [实盘止损单] {symbol} 挂止损单失败（软件止损仍生效）: {e}")
+
+    def _cancel_exchange_stop_loss(self, symbol):
+        """卖出后取消交易所残留的止损单（防止仓位已清零但止损单仍挂着）。"""
+        try:
+            # 查询该 symbol 的所有 open 订单
+            open_orders = self.exchange.fetch_open_orders(symbol)
+            for order in open_orders:
+                # 取消止损单（STOP_LOSS 类型或 stopPrice 参数存在）
+                order_type = order.get('type', '')
+                has_stop = 'stopPrice' in order.get('info', {})
+                if order_type in ('STOP_LOSS', 'stop_loss', 'stop') or has_stop:
+                    self.exchange.cancel_order(order['id'], symbol)
+                    logger.info(f"🧹 [实盘止损单] {symbol} 已取消残留止损单 {order['id']}")
+        except Exception as e:
+            logger.warning(f"⚠️ [实盘止损单] {symbol} 取消残留止损单失败: {e}")
 
     # ═══════════════════════════════════════════════════
     #  主循环

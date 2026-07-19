@@ -248,6 +248,14 @@ class RegimeAdaptiveStrategy(bt.Strategy):
         elif profit_in_atr > 3.0:
             atr_multi = atr_multi * 1.25
 
+        # 保本止损优先检查（在 ATR 追踪止损之前，与 signal_engine 一致）
+        breakeven_trigger = self.spec.get('breakeven_trigger', 0.02)
+        breakeven_buffer = self.spec.get('breakeven_buffer', 0.003)
+        if profit_pct >= breakeven_trigger:
+            breakeven_stop = entry_price * (1 + breakeven_buffer)
+            if price <= breakeven_stop:
+                return f"保本止损(盈利{profit_pct:.1%}后回撤)"
+
         # ATR 追踪止损
         if atr_val > 0:
             trail_stop = self.highest_price - atr_multi * atr_val
@@ -258,14 +266,6 @@ class RegimeAdaptiveStrategy(bt.Strategy):
         hard_stop = entry_price * (1 - self.spec.get('stop_loss_pct', 0.04))
         if price <= hard_stop:
             return "固定止损"
-
-        # 保本止损：盈利超 breakeven_trigger 后止损上移至成本价
-        breakeven_trigger = self.spec.get('breakeven_trigger', 0.02)
-        breakeven_buffer = self.spec.get('breakeven_buffer', 0.003)
-        if profit_pct >= breakeven_trigger:
-            breakeven_stop = entry_price * (1 + breakeven_buffer)
-            if price <= breakeven_stop:
-                return f"保本止损(盈利{profit_pct:.1%}后回撤)"
 
         # 主动止盈
         profit_target = self.spec.get('profit_target_atr', 6.0)
@@ -382,7 +382,7 @@ class RegimeAdaptiveStrategy(bt.Strategy):
                 return "TREND_SMA20_BREAKOUT", 'trend'
 
         if regime in ('RANGE', 'NEUTRAL'):
-            touch_lower = price <= bb_lower * 1.01
+            touch_lower = bb_lower * 0.97 <= price <= bb_lower * 1.01
             bb_width = (bb_upper - bb_lower) / price
             bb_sufficient = bb_width > self.spec.get('regime_range_bb_width', 0.02)
             rsi_bouncing = (rsi_val > rsi_prev and rsi_val < rsi_oversold_thr)
