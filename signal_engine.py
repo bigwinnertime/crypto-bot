@@ -78,8 +78,17 @@ def calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price,
       3. 动量（MACD/RSI）
       4. 价格位置
       5. 趋势方向
+
+    NaN 防护：所有输入参数若为 NaN，该维度给保底分，不崩溃。
     """
+    import math
     score = 0
+
+    # NaN 检查
+    has_nan = any(math.isnan(x) for x in [adx, vol_ratio, rsi, macd, macd_sig, price, sma20, sma60, bb_mid] if x is not None)
+    if has_nan:
+        logger.warning("calc_signal_score 输入含 NaN，返回保底分 26")
+        return 26
 
     # 1. 趋势强度 (0-20)
     if adx >= adx_thr * 1.5:
@@ -160,7 +169,10 @@ def calc_signal_score(adx, vol_ratio, rsi, macd, macd_sig, price,
 
 
 def score_to_position_scale(score, spec):
-    """评分映射仓位：≥80满仓, 60-80八折, 40-60六折, <40放弃。"""
+    """
+    评分映射仓位：≥80 满仓, 60-80 八折, min_score-60 六折, <min_score 放弃。
+    注意：当 min_score > 60 时，60 到 min_score 之间的分数应返回 0（被过滤）。
+    """
     min_score = spec.get('min_signal_score', 40)
     if score < min_score:
         return 0.0
@@ -168,9 +180,7 @@ def score_to_position_scale(score, spec):
         return 1.0
     if score >= 60:
         return 0.8
-    if score >= min_score:
-        return 0.6
-    return 0.0
+    return 0.6
 
 
 def get_regime_position_scale(regime, strategy_type):
@@ -183,7 +193,7 @@ def get_regime_position_scale(regime, strategy_type):
         return 1.0 if strategy_type == 'meanrev' else 0.7
 
 
-def should_buy(price, adx, rsi, rsi_prev, rsi_3_ago,
+def should_buy(price, adx, rsi, rsi_prev,
                sma20, sma60,
                macd, macd_sig, macd_prev,
                bb_lower, bb_mid, bb_upper, vol_ratio, spec, adjusted,

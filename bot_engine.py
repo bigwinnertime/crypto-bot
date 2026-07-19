@@ -87,6 +87,8 @@ class AdvancedTradingBot:
         # 市场情绪（长期规划-2）
         self._sentiment_scale = None
         self._sentiment_update_time = 0
+        # HTF 数据缓存（减少 API 调用）
+        self._htf_cache = {}
 
         init_remote_control(self.risk)
         self.cmd_thread = threading.Thread(target=start_remote_listener, daemon=True)
@@ -97,11 +99,25 @@ class AdvancedTradingBot:
     # ═══════════════════════════════════════════════════
 
     def fetch_data(self, symbol, timeframe=None, limit=100):
+        """获取K线数据。HTF 数据自动缓存4小时（减少 API 调用）。"""
         try:
             clean_symbol = symbol.strip()
             tf = timeframe or config.TIMEFRAME
+
+            # HTF 数据缓存（4小时有效，减少 API 调用）
+            cache_key = f"{clean_symbol}_{tf}"
+            if tf != config.TIMEFRAME:  # 非主时间框架才缓存
+                cached = self._htf_cache.get(cache_key)
+                if cached and (time.time() - cached['ts']) < 14400:  # 4小时缓存
+                    return cached['df']
+
             bars = self.exchange.fetch_ohlcv(clean_symbol, timeframe=tf, limit=limit)
             df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+
+            # 缓存 HTF 数据
+            if tf != config.TIMEFRAME:
+                self._htf_cache[cache_key] = {'df': df, 'ts': time.time()}
+
             return df
         except Exception as e:
             logger.error(f"获取 {symbol} ({timeframe or config.TIMEFRAME}) 数据异常: {str(e)}")
@@ -222,7 +238,7 @@ class AdvancedTradingBot:
 
         # 买入信号（根据市场状态选择策略类型）
         buy_reason, strategy_type, signal_score = self._should_buy(
-            price, adx_val, rsi_val, rsi_prev, rsi_3_ago, sma20, sma60,
+            price, adx_val, rsi_val, rsi_prev, sma20, sma60,
             macd_line, macd_sig, macd_prev,
             bb_lower, bb_mid, bb_upper, vol_ratio, spec, adjusted,
             is_green_candle, candle_body_ratio, regime
@@ -264,14 +280,14 @@ class AdvancedTradingBot:
     #  买入信号（四套逻辑 OR 叠加）
     # ═══════════════════════════════════════════════════
 
-    def _should_buy(self, price, adx, rsi, rsi_prev, rsi_3_ago,
+    def _should_buy(self, price, adx, rsi, rsi_prev,
                     sma20, sma60,
                     macd, macd_sig, macd_prev,
                     bb_lower, bb_mid, bb_upper, vol_ratio, spec, adjusted,
                     is_green_candle=True, candle_body_ratio=0.0, regime='NEUTRAL'):
         """Regime 自适应入场 + 信号评分（委托 signal_engine）。"""
         return _should_buy_impl(
-            price, adx, rsi, rsi_prev, rsi_3_ago, sma20, sma60,
+            price, adx, rsi, rsi_prev, sma20, sma60,
             macd, macd_sig, macd_prev,
             bb_lower, bb_mid, bb_upper, vol_ratio, spec, adjusted,
             is_green_candle, candle_body_ratio, regime
@@ -514,6 +530,7 @@ class AdvancedTradingBot:
                 symbol_dfs = {}
 
                 for symbol in config.SYMBOLS:
+                  try:
                     df = self.fetch_data(symbol)
                     if df.empty:
                         continue
@@ -590,12 +607,12 @@ class AdvancedTradingBot:
                             confirmed_strategy_type = strategy_type
                             # 取两轮评分的较高值
                             confirmed_score = max(signal_score, prev.get('score', 0))
-                            logger.info(f"✅ {symbol} 信号二次确认: {mode} (策略: {strategy_type}, 评分: {confirmed_score}, 前轮: {prev.get('mode')})")
+                            logger.debug(f"✅ {symbol} 信号二次确认: {mode} (策略: {strategy_type}, 评分: {confirmed_score}, 前轮: {prev.get('mode')})")
                             self.pending_signals.pop(symbol, None)
                         else:
                             # 第1轮，记录信号，等待下一轮确认
                             self.pending_signals[symbol] = {'signal': 'BUY', 'mode': mode, 'strategy_type': strategy_type, 'score': signal_score}
-                            logger.info(f"⏳ {symbol} 等待信号二次确认: {mode} (第1/2轮, 评分: {signal_score})")
+                            logger.debug(f"⏳ {symbol} 等待信号二次确认: {mode} (第1/2轮, 评分: {signal_score})")
                     else:
                         # 非BUY信号或熔断状态，清除待确认状态
                         if symbol in self.pending_signals:
@@ -629,7 +646,7 @@ class AdvancedTradingBot:
 
                         # #9: ATR 窗口用 spec.get('atr_period', 14)
                         atr = AverageTrueRange(df['high'], df['low'], df['close'],
-                                               window=spec_for_size.get('atr_period', 14)
+                                               window=spec_for_score.get('atr_period', 14)
                                                ).average_true_range().iloc[-1]
                         amount, trade_amount = self._calc_position_size(symbol, price, atr, total_usdt)
 
@@ -689,6 +706,11 @@ class AdvancedTradingBot:
                             pnl_pct = (fill_price / pos['entry_price'] - 1) * 100
                             send_notification(f"🔻 卖出成交: {symbol}",
                                               f"<b>收益率</b>: {pnl_pct:.2f}%")
+
+                  except Exception as e:
+                    # 单 symbol 异常不中断其他币种处理
+                    logger.exception(f"{symbol} 处理异常: {e}")
+                    continue
 
                 # 跨币种异常检测（长期规划-3）：所有币种处理完后统一检测
                 if symbol_changes:

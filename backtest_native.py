@@ -127,16 +127,15 @@ def calculate_indicators(df, spec):
 #  DataFrame 行适配层（调用 signal_engine）
 # ═══════════════════════════════════════════════════
 
-def should_buy_from_row(row, prev_row, row_3_ago, spec, adjusted, regime):
+def should_buy_from_row(row, prev_row, spec, adjusted, regime):
     """从 DataFrame 行提取指标，调用 signal_engine.should_buy。"""
-    rsi_3_ago = row_3_ago['rsi'] if row_3_ago is not None else None
     candle_body = row['close'] - row['open']
     candle_range = row['high'] - row['low']
     is_green = candle_body > 0
     candle_body_ratio = abs(candle_body) / candle_range if candle_range > 0 else 0
     return should_buy(
         price=row['close'], adx=row['adx'], rsi=row['rsi'],
-        rsi_prev=prev_row['rsi'], rsi_3_ago=rsi_3_ago,
+        rsi_prev=prev_row['rsi'],
         sma20=row['sma20'], sma60=row['sma60'],
         macd=row['macd'], macd_sig=row['macd_signal'], macd_prev=prev_row['macd'],
         bb_lower=row['bb_lower'], bb_mid=row['bb_mid'], bb_upper=row['bb_upper'],
@@ -203,7 +202,6 @@ class NativeBacktester:
         for i in range(60, len(df)):
             row = df.iloc[i]
             prev_row = df.iloc[i - 1]
-            row_3_ago = df.iloc[i - 3] if i >= 3 else None
 
             price = row['close']
             atr = row['atr']
@@ -239,7 +237,7 @@ class NativeBacktester:
             # === 无持仓时：检查买入信号 ===
             if not self.position:
                 buy_reason, strategy_type, signal_score = should_buy_from_row(
-                    row, prev_row, row_3_ago, self.spec, adjusted, regime
+                    row, prev_row, self.spec, adjusted, regime
                 )
 
                 if buy_reason:
